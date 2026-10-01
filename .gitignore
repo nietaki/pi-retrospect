@@ -1,3 +1,6 @@
 node_modules/
 coverage/
 dist/
+
+# Scratch files written by test/session-metadata.test.mjs.
+test/tmp/

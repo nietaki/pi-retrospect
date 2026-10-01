@@ -104,9 +104,87 @@ the header timestamp. `listAll()` returns `modified` descending
 
 `CURRENT_SESSION_VERSION = 3`. `version` is optional on read — absent means v1.
 
-- **v1** linear sequence
-- **v2** tree via `id`/`parentId`
-- **v3** `hookMessage` role renamed to `custom`
+### What each version changed, and when
+
+| Version | Introduced | Structural change |
+|---|---|---|
+| **v1** | original format; sessions with `--continue`/`--resume`/`--session` already existed at the **initial public release 0.10.0 (2025-11-25)** | **Linear array.** Entries have **no `id` and no `parentId`** — position in the file *is* identity. `compaction` refers to `firstKeptEntryIndex` (a numeric index). Extension-injected messages use role `hookMessage`. No in-place branching: an alternative path means a new file. Files predating the `version` field are read as v1 (`header?.version ?? 1`), and `version` is optional in `SessionHeader` — inferred from the code, not observed, since no v1 file survives on this machine. |
+| **v2** | **0.31.0 (2026-01-02)** — "introduces session trees for in-place branching" | **Tree.** Every entry gains `id` (8 hex, collision-checked) + `parentId` (`null` = root); the header stays outside the tree. `firstKeptEntryIndex` → `firstKeptEntryId`, because indices stop being stable once branches exist. Adds a leaf pointer, enabling `/tree` in-place branching with abandoned branches retained in one file. Same release added entry types `branch_summary`, `custom`, `custom_message`, `label`. |
+| **v3** | **0.35.0 (2026-01-05)** — the hooks/custom-tools → single `extensions` unification | **One rename only:** message role `hookMessage` → `custom`. Tree shape, entry types, and all field names are untouched. The `fromHook` flag on `compaction`/`branch_summary`/`custom_message` is surviving naming from that era (Pi's docs call the field name itself legacy). |
+
+> [!important]
+> **The version number tracks two restructures, not capability.** It is still `3`
+> in 0.99.2 (2026-09-30) — roughly nine months and many schema additions after
+> 0.35.0. Added *without* any bump, all reachable in v3 files:
+> `context_edit` entries (0.87.0, 2026-09-21), transcript-backed system messages
+> carrying `sections`/`toolsAdded`/`toolsRemoved` (0.86.0, 2026-09-19), persisted
+> tool/compaction/branch-summary `usage` and expanded usage accounting (0.81.0,
+> 2026-07-21), label timestamps on tree entries (0.65.0, 2026-04-03), and assistant
+> `nestedCalls` / `thinkingLevel` fields.
+>
+> So `version` cannot be used to decide whether an unfamiliar entry `type` or
+> message `role` may appear. Treat unknown kinds as normal and ignore them rather
+> than rejecting the session — which is also what `parseSessionEntryLine`
+> effectively does by skipping lines it cannot parse.
+
+Do not confuse the changelog's `JsonlSessionRepo` **"v4"** and **"v4 session API"**
+entries (inherited harness work, 0.9x) with the session file format version. That
+is a different axis; `CURRENT_SESSION_VERSION` is still 3.
+
+**Local corpus:** the oldest session file on this machine is 2026-09-10 and all 128
+parents and 58 children report `version: 3`, so there is **no v1 or v2 data here to
+test against** — v1/v2 handling needs synthetic fixtures (the shape above is what
+they must look like).
+
+> [!warning]
+> **Migrated entry ids are not stable across loads.** `migrateV1ToV2` has no ids to
+> work with, so it calls `generateId()` — random `randomUUID().slice(0, 8)`,
+> collision-checked only within one pass. Running `parseSessionEntries` +
+> `migrateSessionEntries` twice on the same v1 text gave `e648fd3b ← null,
+> 86923b70 ← e648fd3b`, then `50610b28 ← null, 6480cf86 ← 50610b28`:
+> different ids every time.
+>
+> Pi hides this by rewriting the migrated file at `open()`, so ids become permanent
+> after the first load — a write we must not perform. Therefore **for a v1 file read
+> without writing, an entry id is only valid within a single call**, and a citation
+> like `<path>#<entry-id>` cannot be re-resolved later.
+>
+> Consequence for this tool: either address entries positionally (line/index) when
+> the file is v1, or detect `version < 2` and say so in the output rather than
+> emitting an id that looks stable and is not. Never present a freshly-migrated
+> entry id as a durable reference.
+
+`migrateSessionEntries(entries: FileEntry[])` is the only migration entry point
+Pi exports (`session-manager.d.ts:181`). It mutates **in place**, returns `void`,
+and expects header **and** entries together:
+
+```ts
+import { migrateSessionEntries, parseSessionEntries } from "@earendil-works/pi-coding-agent";
+
+const file = parseSessionEntries(readFileSync(path, "utf8")); // pure, no writes
+migrateSessionEntries(file);                                  // in place, whole file
+```
+
+> [!danger]
+> **Never migrate a header row on its own.** `version` describes the *entries*, not
+> the header. Measured on one v1 file: migrating the whole array mints entry `id`s,
+> builds the `parentId` chain, converts `firstKeptEntryIndex` → `firstKeptEntryId`,
+> and renames `hookMessage` → `custom`; migrating `[file[0]]` bumps the header to 3
+> and leaves all of that undone — a file claiming v3 whose entries are still v1,
+> with no `firstKeptEntryId` for `buildContextEntries` to read. Passing a bare
+> header does "work" (only `version` is touched), it is just never correct.
+>
+> Adjacent trap: `migrateToCurrentVersion` computes `const version = header?.version ?? 1`.
+> Passing an array **without** its header — easy, since `getEntries()` excludes the
+> header — is read as "v1" and runs `migrateV1ToV2`, which unconditionally
+> regenerates every entry `id` and rebuilds the whole `parentId` chain
+> (`session-manager.js:31-53`). That silently orphans `context_edit.targetId`,
+> `label.targetId`, `branch_summary.fromId`, `compaction.firstKeptEntryId`, and any
+> citation made against the old ids.
+
+`pi-retrospect` is a reader, so it should call neither `open()` nor
+`migrateSessionEntries` against a file it intends to leave untouched: migrate
+in-memory copies only, and never rewrite.
 
 > [!warning]
 > **`SessionManager.open()` can write to the file, on any version.** Two separate
