@@ -1,16 +1,41 @@
 {
   "name": "pi-retrospect",
   "version": "0.1.0",
-  "description": "Explore past Pi sessions and their messages",
+  "description": "Tools to explore past Pi sessions to facilitate harness self-improvement",
   "type": "module",
-  "keywords": ["pi-package"],
+  "license": "MIT",
+  "author": "nietaki",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "sessions",
+    "history",
+    "retrospect"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nietaki/pi-retrospect.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nietaki/pi-retrospect/issues"
+  },
+  "homepage": "https://github.com/nietaki/pi-retrospect#readme",
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
-    "check": "npm run test && npm run typecheck"
+    "check": "npm run test && npm run typecheck",
+    "prepublishOnly": "npm run check"
   },
+  "files": [
+    "src",
+    "docs",
+    "README.md"
+  ],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
