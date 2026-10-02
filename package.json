@@ -22,7 +22,9 @@
   },
   "homepage": "https://github.com/nietaki/pi-retrospect#readme",
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "test": "vitest run",
+    "coverage": "vitest run --coverage",
+    "test:node": "node --experimental-strip-types --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run test && npm run typecheck",
     "prepublishOnly": "npm run check"
@@ -43,6 +45,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.9.3"
+    "@vitest/coverage-v8": "^5.0.3",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.3"
   }
 }
