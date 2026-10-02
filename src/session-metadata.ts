@@ -27,9 +27,10 @@ function isLeapYear(year: number): boolean {
  *
  * `Date.parse("2026-02-30T08:00:00.000Z")` rolls over to March 2 instead of failing, so an
  * impossible date would otherwise pass validation and reach the output as an untrustworthy
- * timestamp string.
+ * timestamp string. Also used to vet timestamp filter parameters (`list-sessions.ts`), where
+ * the same rollover would silently widen or narrow a range.
  */
-function isRealTimestamp(timestamp: string): boolean {
+export function isRealTimestamp(timestamp: string): boolean {
   const parts = ISO_8601_TIMESTAMP.exec(timestamp);
   if (!parts) return false;
 

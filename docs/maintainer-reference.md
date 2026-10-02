@@ -19,8 +19,30 @@ caller half is produced; the caller half states *what* is guaranteed.
 ```ts
 import { Type, type Static } from "@earendil-works/pi-ai";
 
+export const CwdMatchSchema = Type.Union([Type.Literal("exact"), Type.Literal("sibling-prefix")], {
+  default: "exact",
+  /* description: what sibling-prefix is for, and that it reads no git metadata */
+});
+
+export const SessionSortFieldSchema = Type.Union(
+  [Type.Literal("timestamp"), Type.Literal("cwd"), Type.Literal("path"), Type.Literal("id")],
+  { default: "timestamp" },
+);
+
+export const SortDirectionSchema = Type.Union([Type.Literal("asc"), Type.Literal("desc")], {
+  default: "asc",
+});
+
 export const ListSessionsParamsSchema = Type.Object(
-  {},
+  {
+    cwds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
+    startTimestamp: Type.Optional(Type.String()),
+    endTimestamp: Type.Optional(Type.String()),
+    cwdMatch: Type.Optional(CwdMatchSchema),
+    sortBy: Type.Optional(SessionSortFieldSchema),
+    sortDirection: Type.Optional(SortDirectionSchema),
+    limit: Type.Optional(Type.Integer({ minimum: 1 })),
+  },
   { additionalProperties: false },
 );
 
@@ -67,6 +89,9 @@ export const ListSessionsOutputSchema = Type.Object(
 );
 
 export type ListSessionsParams = Static<typeof ListSessionsParamsSchema>;
+export type CwdMatch = Static<typeof CwdMatchSchema>;
+export type SessionSortField = Static<typeof SessionSortFieldSchema>;
+export type SortDirection = Static<typeof SortDirectionSchema>;
 export type SessionMetadata = Static<typeof SessionMetadataSchema>;
 export type ListSessionsWarning = Static<typeof ListSessionsWarningSchema>;
 export type ListSessionsOutput = Static<typeof ListSessionsOutputSchema>;
@@ -83,10 +108,18 @@ data and must not be rejected here.
 `format: "date-time"` is a real guarantee rather than documentation, because timestamps are
 validated before a row is returned (see Validation rules).
 
+Filter parameters are `Type.String()`, **not** `format: "date"`/`"date-time"`: this TypeBox
+release does not enforce formats, so both shapes are checked in `src/query.ts` instead.
+`default` annotations on the enums document behavior; the code still applies the defaults
+itself (`params.cwdMatch ?? "exact"`, `params.sortBy ?? "timestamp"`,
+`params.sortDirection === "desc"`) because nothing guarantees the schema fills them in.
+`Type.Integer({ minimum: 1 })` is a documentation-and-validation hint, and `buildQuery`
+throws for a bad `limit` as well, so the exported function is safe when called directly.
+
 ### Implementation boundary
 
-The tool takes no parameters; the implementation takes the root, so tests can point it at a
-fixture tree.
+The tool takes optional filter parameters; the implementation also takes the root, so tests
+can point it at a fixture tree.
 
 ```ts
 export interface ListSessionsOptions {
@@ -100,6 +133,19 @@ export async function listSessions(
   options: ListSessionsOptions,
 ): Promise<ListSessionsOutput>;
 ```
+
+Two modules split the work:
+
+- `src/list-sessions.ts` — discovery. Walks the root, reads and validates headers, nests
+  transcripts, sorts warnings. Knows nothing about filtering, ordering, or limiting.
+- `src/query.ts` — the query. `buildQuery(params)` returns `{ matchesRoot, compareRoots,
+  limit }` and throws on bad parameters; `applyQuery(roots, query)` filters, sorts, and
+  slices the **top level only**. It receives already-validated rows, so every parameter rule
+  is testable through `listSessions` without touching disk.
+
+`buildQuery` runs before the first `readdir`, which is why a malformed timestamp or a
+reversed range fails on an unreadable root rather than returning `sessions: []` plus a
+warning: a caller's typo must not look like absent history.
 
 The registered wrapper supplies the root. Pi's `getSessionsDir()` is **not** re-exported
 from the package root; `getAgentDir()` is, and it honors the agent-dir environment
@@ -189,13 +235,45 @@ output as an untrustworthy string.
 
 ### Ordering rules
 
-`timestamp` **ascending**, oldest first, at both levels, with ties broken by `path`. The
-sessions root is resolved to an absolute path before the walk, so `path` is absolute even
-when a caller passes a relative `sessionsRoot`. `warnings` are sorted by `path` (then
-`reason`) so a run is reproducible regardless of `readdir` order. Ascending was chosen so
-that a parent's subagent children appear in launch order, which mirrors how the runs were
-started. The tool description is where "the sessions a caller usually wants are at the
-tail" has to be spelled out, because ascending order is the counter-intuitive half.
+The **top level** follows `sortBy` + `sortDirection`, defaulting to `timestamp` ascending.
+A non-`timestamp` field falls back to `timestamp` and then to `path`; a `timestamp` sort
+falls back straight to `path`, which is the documented unique handle, so the comparison is
+total and a run is reproducible. `desc` negates the finished comparison — tie-breaks flip
+with it, which is what "reverse the order" means to a caller. String comparisons are
+codepoint-order `<`/`>`, never `localeCompare`, so ordering does not change with the
+machine's locale.
+
+**Children are exempt**: `subagentSessions` is always timestamp ascending, ties by `path`,
+because a parent's runs must read in launch order. Sorting therefore happens twice — inside
+`nestTranscripts` for children, inside `applyQuery` for roots — and `path` is absolute in
+both because the sessions root is resolved with `path.resolve()` before the walk.
+
+`warnings` are sorted by `path` (then `reason`) so a run is reproducible regardless of
+`readdir` order, and they are never filtered: they describe the scan, not the kept subset.
+
+### Filter rules
+
+- **Scope.** `matchesRoot` is applied to top-level rows only, so a kept parent always
+  arrives with its full tree. This is the alternative to pruning children, which would make
+  "sessions in this range" unspeakable whenever a child's own `cwd` or timestamp differs.
+- **Dates are UTC**, matching `new Date().toISOString()` in Pi's `session-manager.js` (196
+  of 196 timestamps on this machine's store end in `Z`). A date-only start is
+  `Date.UTC(y, m-1, d)`; a date-only end is that plus 86 400 000 ms, compared with `>=`, so
+  the day is included whole. `23:59:59.999` was rejected as a cut because a header carrying
+  more precision would silently vanish.
+- **Date-times need an offset.** `ISO_DATE_TIME_WITH_OFFSET` gates the value before
+  `Date.parse`, so a naive `"2026-02-01T12:30:00"` throws instead of resolving in the local
+  zone. Values that do carry `Z` or `±HH:MM` are compared as instants, and the existing
+  `isRealTimestamp` calendar check (exported from `session-metadata.ts`) rejects impossible
+  dates that `Date.parse` would roll over.
+- **`sibling-prefix` is lexical.** Trailing separators are stripped (`/repo/app` equals
+  `/repo/app/`), then a candidate matches if it equals the requested path or shares its
+  `dirname()` and has a basename starting with `<requested-basename>-`. No `git` call, no
+  `realpath`, no case folding: path comparisons stay exactly as headers recorded them.
+- **`limit` caps output, not work.** Headers are all read first; there is no index.
+- **Errors are throws.** Unparseable bounds, impossible dates, naive date-times, a range
+  ending before it starts, and `limit < 1` each throw, which the tool layer turns into a
+  failed tool result. Matching nothing is not an error.
 
 ### Missing or empty root
 
@@ -228,10 +306,13 @@ defineTool({
 ```
 
 The registered `description` must keep telling the caller what it cannot infer from the
-shape: that results are oldest-first so the newest session is last, that nesting is
-expressed by `subagentSessions` while `parentSessionPath` is fork lineage, and that an
-empty list plus warnings means unreadable rather than absent history. It currently does not
-say that `path` is the handle to key on — see TODOs.
+shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
+filters and ordering act on top-level sessions while children arrive whole and in launch
+order, that a date-only `endTimestamp` means the whole UTC day, that `sibling-prefix` is a
+path heuristic rather than git detection, that nesting is expressed by `subagentSessions`
+while `parentSessionPath` is fork lineage, and that an empty list plus warnings means
+unreadable rather than absent history. It currently does not say that `path` is the handle
+to key on — see TODOs.
 
 `exposure`, `annotations`, and `outputSchema` require **Pi >= 0.99.0** (added
 2026-09-29). Peer ranges stay `"*"` because that is Pi's stated convention for
@@ -277,8 +358,16 @@ deliberately broken file per warning branch. Fixture headers are hand-written; n
 session data is committed.
 
 Assertions target the contract, not Pi's format: ordering, absolute paths, nesting by
-containment, one row per run directory, symlink and non-slug exclusion, and warning
-coverage.
+containment, one row per run directory, symlink and non-slug exclusion, warning coverage,
+and the parameter rules.
+
+`test/list-sessions-filters.test.mjs` covers parameters. It reads the committed fixtures for
+shapes the walk already produces, and builds throwaway trees under `test/tmp/filters/`
+(gitignored, written by the test) for grids the committed fixtures deliberately do not hold:
+worktree-named siblings, timestamp boundaries at midnight and at `23:59:59.999`, and parent
+rows with children whose `cwd` and timestamp fall outside the filter. Keeping those grids
+out of `test/fixtures/sessions/` protects the whole-store assertions in
+`test/list-sessions.test.mjs`, which count rows and warnings exactly.
 
 Measured against the **live** store on this machine: every parent and child transcript
 discovered, 0 warnings, unique paths and ids, ordering correct, and the whole walk
@@ -287,8 +376,9 @@ parent/child trees for spot-checks — see TODOs.
 
 ### Implementation guarantees
 
-Restated from the caller half as properties a change must not break: total ascending
-ordering with `path` tie-break at every level; `subagentSessions` always present; each file
+Restated from the caller half as properties a change must not break: a total, reproducible
+order (top level per `sortBy`/`sortDirection` with `timestamp` then `path` tie-breaks,
+children always timestamp ascending); `subagentSessions` always present; each file
 reported at most once; containment-only child linkage with no structural field connecting
 parents to children (Pi's `SessionHeader.parentSession` means fork/clone lineage, verified
 against `pi-subagents` 0.74.0); `path` as the stable handle because `id` may repeat across
@@ -308,12 +398,24 @@ discovered session are considered.
 - **Generate real fixture data.** Run subagent workflows in this project's `cwd` so that
   project's `--<slug>--/` session directory grows actual parent/child trees, then use them
   to check the synthetic layout against reality. Do not commit the output.
-- **Filtering parameters.** `params` is an empty object by design. Deferred for later:
-  by project/`cwd`, by time range, by presence of subagents, `includeCurrentSession`
-  (the currently running session is included today; an exclusion parameter is the agreed
-  future direction), depth limit for `subagentSessions`.
-- **Ordering choice review.** Ascending order follows launch chronology; if callers keep
-  needing the newest session, add a parameter rather than flipping the default.
+- **Remaining filter parameters.** Time range, `cwd`, ordering, and a row cap exist now.
+  Still deferred: by presence or count of subagents, `includeCurrentSession` (the currently
+  running session is included today; an exclusion parameter is the agreed future direction,
+  most likely `excludePaths`), and a depth limit for `subagentSessions`.
+- **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
+  (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for
+  this project" rather than like a mistake. Two ways out, not chosen yet: reject a
+  non-absolute entry in `buildQuery` — cheap, and it keeps the listing independent of where the
+  caller sits, which matters because a codemode script may be asking about another checkout
+  than its own session; or resolve before comparing, which needs the caller's working directory
+  threaded in from `ExtensionContext.cwd`, a separate decision about `~` expansion, and accepts
+  that the same parameters can select different sessions in two sessions. Nothing relative is
+  pinned by a test today — `test/list-sessions-filters.test.mjs` uses absolute entries, plus
+  the non-matching `cwds: ["/repo/never"]` case that keeps `warnings` whole — so whichever way
+  this goes, the test comes with it.
+- **Pagination.** `limit` caps rows but does not cursor. If a store ever needs more, a
+  cursor carrying the sort value plus `path` beats an `offset`, which shifts as history
+  grows.
 - **Orphaned child trees.** Today they are reported neither as a row nor as a warning. If
   that ever needs to be visible, it should become an explicit warning branch rather than a
   silent rule.

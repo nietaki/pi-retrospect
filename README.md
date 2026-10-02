@@ -39,6 +39,27 @@ each file's header line, and returns session metadata — id, absolute path, abs
 nested under the session that launched them, plus a warning for every file it had to
 skip.
 
+All of its parameters are optional, and all of them act on **top-level** sessions — a
+matching parent always arrives with its complete subagent tree:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `cwds` | all working directories | Absolute `cwd`s to keep. |
+| `cwdMatch` | `"exact"` | `"sibling-prefix"` also keeps sibling directories whose basename extends the requested one — the shape of git worktrees placed next to the main checkout (a lexical path rule; no git metadata is read). |
+| `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds. A date is a **UTC** calendar day, and a date-only `endTimestamp` covers that whole day; a date-time must carry `Z` or `±HH:MM`. |
+| `sortBy`, `sortDirection` | `"timestamp"`, `"asc"` | Top-level order only; children always stay in launch order. `"desc"` puts the newest first. |
+| `limit` | none | Cap on returned rows, after filtering and sorting. Headers are still all read. |
+
+```js
+// in a codemode script — the project and its worktrees, ten newest first
+const { sessions } = await tools.list_sessions({
+  cwds: ["/Users/me/repos/my-app"],
+  cwdMatch: "sibling-prefix",
+  sortDirection: "desc",
+  limit: 10,
+});
+```
+
 **It is exposed to codemode, not to the model.** The tool registers with
 `exposure: "codemode"`, so it is never declared in the model's tool list and is not
 activated on registration. Call it from a codemode script:

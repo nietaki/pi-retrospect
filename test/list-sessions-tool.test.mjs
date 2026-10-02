@@ -13,9 +13,21 @@ test("the tool is registered as a codemode-only read-only listing", () => {
   assert.equal(tool.label, "List Sessions");
   assert.equal(tool.exposure, "codemode");
   assert.deepEqual(tool.annotations, { readOnlyHint: true });
-  assert.deepEqual(tool.parameters, { type: "object", properties: {}, additionalProperties: false });
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), [
+    "cwdMatch",
+    "cwds",
+    "endTimestamp",
+    "limit",
+    "sortBy",
+    "sortDirection",
+    "startTimestamp",
+  ]);
+  assert.equal(tool.parameters.required, undefined, "every parameter is optional");
+  assert.equal(tool.parameters.additionalProperties, false);
   assert.equal(tool.outputSchema.type, "object");
-  assert.ok(tool.description.includes("newest last"));
+  assert.ok(tool.description.includes("the newest session is last"));
+  assert.ok(tool.description.includes("TOP-LEVEL sessions only"), "description states what filters act on");
+  assert.ok(tool.description.includes("reads no git metadata"), "description bounds the worktree heuristic");
 });
 
 test("the tool returns structured content matching its output schema", async () => {
@@ -29,6 +41,14 @@ test("the tool returns structured content matching its output schema", async () 
   assert.equal(result.content.length, 1);
   assert.equal(result.content[0].type, "text");
   assert.match(result.content[0].text, /^Sessions \(7\)/m);
+});
+
+test("the tool passes parameters through to the listing", async () => {
+  const expected = await listSessions({ cwds: ["/repo/beta"] }, { sessionsRoot: FIXTURES });
+  const result = await tool.execute("call-3", { cwds: ["/repo/beta"] }, undefined, undefined, {});
+
+  assert.deepEqual(result.structuredContent.sessions, expected.sessions);
+  assert.match(result.content[0].text, /^Sessions \(3\)/m);
 });
 
 test("the tool honors an aborted signal", async () => {

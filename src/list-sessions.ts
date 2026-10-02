@@ -2,12 +2,16 @@
  * Walk the Pi sessions directory and return session metadata, with subagent transcripts
  * nested under the session that launched them.
  *
+ * Parameter handling — filtering, ordering, limiting — lives in `query.ts`; this module only
+ * discovers and validates rows, then applies the prepared query to the top level.
+ *
  * Contract: docs/tool-api.md
  */
 
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
+import { applyQuery, buildQuery } from "./query.ts";
 import { readSessionHeader } from "./session-metadata.ts";
 import type {
   ListSessionsOutput,
@@ -185,16 +189,21 @@ function nestTranscripts(
 }
 
 /**
- * List every discoverable session under `options.sessionsRoot`.
+ * List discoverable sessions under `options.sessionsRoot`, after the query built from
+ * `params` is applied to the top level.
  *
- * Sessions are ordered by `timestamp` ascending — oldest first, so a parent's subagent
- * children appear in launch order. Files that cannot be read or whose header is invalid are
- * skipped and reported in `warnings` instead.
+ * Without parameters the result is every session, ordered by `timestamp` ascending — oldest
+ * first, so a parent's subagent children appear in launch order. Files that cannot be read or
+ * whose header is invalid are skipped and reported in `warnings` instead; `warnings` always
+ * describe the whole scan, even for files a filter would have excluded.
  */
 export async function listSessions(
-  _params: ListSessionsParams,
+  params: ListSessionsParams,
   options: ListSessionsOptions,
 ): Promise<ListSessionsOutput> {
+  // Reject bad parameters before touching the filesystem.
+  const query = buildQuery(params);
+
   const sessionsRoot = resolve(options.sessionsRoot);
   const { signal } = options;
   const warnings: ListSessionsWarning[] = [];
@@ -253,8 +262,7 @@ export async function listSessions(
     }
   }
 
-  sessions.sort(compareSessions);
   warnings.sort(compareWarnings);
 
-  return { sessions, warnings };
+  return { sessions: applyQuery(sessions, query), warnings };
 }
