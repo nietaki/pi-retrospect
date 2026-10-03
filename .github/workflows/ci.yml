@@ -1,0 +1,59 @@
+name: CI
+
+# Triggers
+#
+# - `pull_request`: every open PR, including updates pushed to it.
+# - `push` on the default branch: keeps master's own history green.
+# - `workflow_dispatch`: manual run for debugging.
+#
+# Deliberately absent: tags, releases, and any npm publish step. Publishing stays manual.
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# Minimal privileges: the job only reads the repository and installs from the lockfile.
+# No `packages: write`, no secrets, no deployment environment.
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR supersedes the previous run. The default branch is
+# excluded from cancellation so a finished run there is never thrown away mid-flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js 22
+        # `cache: npm` must be explicit: automatic npm caching only kicks in when package.json
+        # declares a `packageManager` field, which this package does not.
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        # `npm ci` fails if package-lock.json is out of sync with package.json, which is the
+        # lockfile-integrity check we want in CI.
+        run: npm ci
+
+      - name: Run checks
+        # `npm run check` is the canonical project gate: clean scratch state, run the Vitest
+        # suite, then `tsc --noEmit`. It runs them sequentially on purpose — the suite shares
+        # `test/tmp/`, so two Vitest processes in one checkout would collide.
+        run: npm run check
+
+      - name: Verify package contents
+        # Dry-run only: lists what `npm publish` would ship (src/, docs/, README.md) without
+        # writing a tarball or touching the registry. Catches `files` allowlist regressions.
+        run: npm pack --dry-run

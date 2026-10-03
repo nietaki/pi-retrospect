@@ -86,6 +86,16 @@ analysis this contract was derived from — lives in the author's Obsidian vault
 than in the published package, because it documents Pi's schema (which changes with
 Pi, not with this package) and quotes counts from one developer's local session store.
 
+## Development
+
+Run the gate locally with `npm run check` — it cleans `test/tmp/`, runs the Vitest suite,
+then type-checks with `tsc --noEmit`. Do not run two Vitest processes in one checkout at
+once: the start-of-run purge is not concurrency-safe.
+
+CI is `.github/workflows/ci.yml`: on pull requests, pushes to `master`, and manual dispatch it
+installs with `npm ci`, runs `npm run check`, and verifies the tarball contents with
+`npm pack --dry-run`. It publishes nothing.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
