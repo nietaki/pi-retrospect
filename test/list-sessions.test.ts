@@ -10,7 +10,7 @@
  */
 
 import { mkdir } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
 import { listSessions } from "../src/list-sessions.ts";
@@ -19,7 +19,7 @@ import type { ListSessionsOutput, SessionMetadata } from "../src/schemas.ts";
 
 const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
 
-/** Scratch tree for the empty-root case, written by the test and never committed. */
+/** Scratch paths under `test/tmp/`, never committed: the empty-root case writes here. */
 const TMP = new URL("tmp/", import.meta.url).pathname;
 
 /** `00000000-0000-4000-8000-0000000000NN` -> NN, so expectations read as short labels. */
@@ -182,6 +182,8 @@ describe("listSessions warnings", () => {
     for (const session of flatten(sessions)) {
       expect(warnedPaths.has(session.path), `${session.path} is both a row and a warning`).toBe(false);
     }
+    expect(warnedPaths.size, "a path is never warned twice, so sorting never needs the reason tie-break")
+      .toBe(warnings.length);
 
     expect(warnings.length).toBe(expectedReasons.length);
     expect(
@@ -210,6 +212,19 @@ describe("listSessions warnings", () => {
     expect(output.warnings[0].reason).toMatch(/sessions root not readable/);
   });
 
+  it("resolves a relative sessionsRoot before naming it in a warning", async () => {
+    // Every returned path is documented as absolute, including warning paths, so a caller
+    // given a relative root still gets a path it can read back.
+    const root = join(`${TMP}list-sessions-relative-root`, "absent-store");
+    const output = await listSessions({}, { sessionsRoot: relative(process.cwd(), root) });
+
+    expect(output.sessions).toStrictEqual([]);
+    expect(output.warnings).toHaveLength(1);
+    expect(isAbsolute(output.warnings[0].path), "the warning names the resolved root").toBe(true);
+    expect(output.warnings[0].path).toBe(root);
+    expect(output.warnings[0].reason).toMatch(/sessions root not readable/);
+  });
+
   it("returns nothing and warns about nothing for an empty sessions root", async () => {
     const root = `${TMP}list-sessions-empty-root`;
     await mkdir(root, { recursive: true });
@@ -227,6 +242,26 @@ describe("listSessions warnings", () => {
     await expect(
       listSessions({}, { sessionsRoot: FIXTURES, signal: controller.signal }),
     ).rejects.toSatisfy((error: Error) => error.name === "AbortError" || /abort/i.test(error.message));
+  });
+
+  it("rethrows an Error abort reason unchanged", async () => {
+    const controller = new AbortController();
+    const reason = new RangeError("custom abort reason");
+    controller.abort(reason);
+
+    // The caller's own reason must survive: it is the only thing naming why the walk stopped.
+    await expect(listSessions({}, { sessionsRoot: FIXTURES, signal: controller.signal })).rejects.toBe(reason);
+  });
+
+  it("throws its own error when the abort reason is not an Error", async () => {
+    const controller = new AbortController();
+    controller.abort("stop now");
+
+    // `abort(reason)` accepts any value, so rethrowing it raw would hand the caller a string
+    // where a thrown value is expected.
+    await expect(
+      listSessions({}, { sessionsRoot: FIXTURES, signal: controller.signal }),
+    ).rejects.toThrowError("listSessions was aborted");
   });
 });
 

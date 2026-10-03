@@ -58,8 +58,7 @@ function containerOf(path: string): string {
 }
 
 function containsPath(container: string, path: string): boolean {
-  const prefix = container.endsWith("/") ? container : `${container}/`;
-  return path.startsWith(prefix);
+  return path.startsWith(`${container}/`);
 }
 
 /** Timestamp ascending, oldest first; ties broken by path so the order is total. */
@@ -67,9 +66,9 @@ function compareSessions(a: SessionMetadata, b: SessionMetadata): number {
   const left = Date.parse(a.timestamp);
   const right = Date.parse(b.timestamp);
 
+  // Paths are unique among rows, so a path tie-break never has to answer "equal".
   if (left !== right) return left - right;
-  if (a.path !== b.path) return a.path < b.path ? -1 : 1;
-  return 0;
+  return a.path < b.path ? -1 : 1;
 }
 
 /** Warnings are sorted by path so a run is reproducible despite readdir order. */
@@ -115,7 +114,7 @@ async function collectSubagentTranscripts(
     if ((error as { code?: string }).code === "ENOENT") return [];
     warnings.push({
       path: directory,
-      reason: `subagent directory not readable: ${error instanceof Error ? error.message : String(error)}`,
+      reason: `subagent directory not readable: ${(error as Error).message}`,
     });
     return [];
   }
@@ -221,7 +220,7 @@ export async function listSessions(
       warnings: [
         {
           path: sessionsRoot,
-          reason: `sessions root not readable: ${error instanceof Error ? error.message : String(error)}`,
+          reason: `sessions root not readable: ${(error as Error).message}`,
         },
       ],
     };
@@ -241,7 +240,7 @@ export async function listSessions(
     } catch (error) {
       warnings.push({
         path: projectDir,
-        reason: `project directory not readable: ${error instanceof Error ? error.message : String(error)}`,
+        reason: `project directory not readable: ${(error as Error).message}`,
       });
       continue;
     }
