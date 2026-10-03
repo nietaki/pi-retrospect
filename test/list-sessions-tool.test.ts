@@ -1,6 +1,4 @@
 /**
- * Vitest port of `test/list-sessions-tool.test.mjs`.
- *
  * Covers the registered shape of the `list_sessions` tool (codemode-only, read-only, every
  * parameter optional), that its structured result equals `listSessions`, and that the
  * extension entry point registers exactly that one tool.

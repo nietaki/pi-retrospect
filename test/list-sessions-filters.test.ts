@@ -1,11 +1,9 @@
 /**
- * Vitest port of `test/list-sessions-filters.test.mjs`.
- *
  * Parameter behavior of `listSessions`: filtering, ordering, and limiting.
  *
- * Scratch trees live under `test/tmp/vitest/filters/` rather than the `node:test` suite's
- * `test/tmp/filters/`, so the two suites can never interleave on one tree. Committed fixtures
- * under `test/fixtures/sessions/` are read-only and shared.
+ * Scratch trees are built under `test/tmp/filters/` (gitignored) for grids the committed
+ * fixtures deliberately do not hold. Committed fixtures under `test/fixtures/sessions/` are
+ * read-only and shared.
  *
  * Contract: docs/tool-api.md
  */
@@ -20,7 +18,7 @@ import type { SessionMetadata } from "../src/schemas.ts";
 const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
 
 /** Scratch trees for parameter grids that the committed fixtures deliberately do not hold. */
-const TMP = new URL("tmp/vitest/filters/", import.meta.url).pathname;
+const TMP = new URL("tmp/filters/", import.meta.url).pathname;
 
 const uuid = (n: number): string => `00000000-0000-4000-8000-00000000${String(n).padStart(4, "0")}`;
 

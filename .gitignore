@@ -2,5 +2,5 @@ node_modules/
 coverage/
 dist/
 
-# Scratch files written by test/session-metadata.test.mjs.
+# Scratch files written by the Vitest suite (test/tmp/, test/tmp/filters/).
 test/tmp/

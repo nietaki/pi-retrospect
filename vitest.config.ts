@@ -2,11 +2,10 @@ import { defineConfig } from "vitest/config";
 
 // Vitest configuration.
 //
-// `include` is deliberately narrow. Vitest's default pattern
-// (`**/*.{test,spec}.?(c|m)[jt]s?(x)`) also matches the `node:test` files in this
-// directory, which import `test()` from `node:test` and therefore register nothing with
-// Vitest's runner - collecting them would fail the run. While both suites coexist, only
-// `*.test.ts` belongs to Vitest; the `*.test.mjs` originals stay on `npm run test:node`.
+// `include` is scoped to the TypeScript suite. Vitest's default pattern
+// (`**/*.{test,spec}.?(c|m)[jt]s?(x)`) would also collect any `*.test.js` or `*.spec.*`
+// artifact that lands in `coverage/`, `dist/`, or a generated tree, so collection stays
+// explicit: `test/**/*.test.ts` is the whole suite.
 // These are `//` comments because a literal `*/` inside a block comment would end it.
 export default defineConfig({
   test: {

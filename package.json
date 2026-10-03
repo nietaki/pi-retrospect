@@ -24,7 +24,6 @@
   "scripts": {
     "test": "vitest run",
     "coverage": "vitest run --coverage",
-    "test:node": "node --experimental-strip-types --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run test && npm run typecheck",
     "prepublishOnly": "npm run check"

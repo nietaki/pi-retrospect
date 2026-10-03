@@ -1,8 +1,6 @@
 /**
- * Vitest port of `test/content.test.mjs`.
- *
  * Covers `renderListSessionsContent`: path rows with nesting indentation, the conditional
- * warnings section, and the empty-store header. One assertion per `node:test` original.
+ * warnings section, and the empty-store header.
  *
  * Contract: docs/tool-api.md
  */

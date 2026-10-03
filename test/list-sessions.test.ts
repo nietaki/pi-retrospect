@@ -1,12 +1,10 @@
 /**
- * Vitest port of `test/list-sessions.test.mjs`.
- *
  * Discovery and tree shape: which files become rows, how children nest, what gets warned
- * about once, and that the declared schema matches what is returned. Fixture-driven, so
- * `npm run test:node` and Vitest read the same committed tree under `test/fixtures/sessions/`.
+ * about once, and that the declared schema matches what is returned. Every case reads the
+ * same committed tree under `test/fixtures/sessions/`.
  *
- * The store is read once at module scope, exactly as the original did, and every test below
- * asserts against that same result.
+ * The store is read once at module scope, and every test below asserts against that same
+ * result.
  *
  * Contract: docs/tool-api.md
  */
@@ -21,8 +19,8 @@ import type { ListSessionsOutput, SessionMetadata } from "../src/schemas.ts";
 
 const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
 
-/** Scratch tree for the empty-root case, kept clear of the `node:test` suite's `test/tmp/`. */
-const TMP = new URL("tmp/vitest/", import.meta.url).pathname;
+/** Scratch tree for the empty-root case, written by the test and never committed. */
+const TMP = new URL("tmp/", import.meta.url).pathname;
 
 /** `00000000-0000-4000-8000-0000000000NN` -> NN, so expectations read as short labels. */
 const tag = (id: string): string => id.slice(-4);

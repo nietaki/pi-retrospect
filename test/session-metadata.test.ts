@@ -1,13 +1,11 @@
 /**
- * Vitest port of `test/session-metadata.test.mjs`.
- *
  * Covers `readFirstLine` (bounded first-line read), `validateHeaderLine` (the field checks
  * behind every trustworthy row), and `readSessionHeader` (the two composed).
  *
  * The src result types are discriminated unions (`{ ok: true; line } | { ok: false; reason }`),
  * and an `expect(result.ok).toBe(true)` does not narrow them, so the `lineOf` / `valuesOf` /
- * `reasonOf` helpers below unwrap after asserting. Every `node:test` assertion is still made
- * in place; the helpers only satisfy strict TypeScript.
+ * `reasonOf` helpers below unwrap after asserting. The helpers only satisfy strict TypeScript;
+ * every assertion is made where the case needs it.
  *
  * Contract: docs/tool-api.md
  */
@@ -26,11 +24,11 @@ import type { HeaderResult, SessionHeaderValues } from "../src/session-metadata.
 
 type FirstLineResult = Awaited<ReturnType<typeof readFirstLine>>;
 
-const TEMP = new URL("tmp/vitest/", import.meta.url).pathname;
+const TEMP = new URL("tmp/", import.meta.url).pathname;
 
 let written = 0;
 
-/** Write a scratch file under test/tmp/vitest/ so bound tests read real bytes off disk. */
+/** Write a scratch file under test/tmp/ so bound tests read real bytes off disk. */
 async function write(name: string, contents: string): Promise<string> {
   const path = join(TEMP, `${written++}-${name}`);
   await mkdir(dirname(path), { recursive: true });
