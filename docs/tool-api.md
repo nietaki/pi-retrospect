@@ -1,6 +1,9 @@
 # Tool API
 
-The contract for the operations `pi-retrospect` exposes.
+The contract for the operations `pi-retrospect` exposes: `list_sessions`, which finds session
+files, and `session_entries`, which reads the entries inside one of them.
+
+These are read primitives. Neither one searches, summarizes, nor rebuilds the model's context.
 
 ## Calling `list_sessions`
 
@@ -270,5 +273,174 @@ adds no warning.
   range instead. The currently running session **is** included — verified
   2026-10-02, where `sessions.at(-1)` matched `$PI_SESSION_FILE`. Exclude it yourself by
   comparing against that variable if you mean "previous sessions only".
-- **Sessions only.** Message content is out of scope for this operation.
+- **Sessions only.** Message content is out of scope for this operation — that is
+  `session_entries`, which takes a `path` from here and reads the entries inside the file.
+
+---
+
+## Calling `session_entries`
+
+### Purpose
+
+`session_entries` reads one session file and returns its entries, each addressed by its physical
+line number and carrying the parsed line unchanged as `raw`. It is the step after `list_sessions`:
+that operation names transcript files, this one opens one.
+
+It is a **reader of stored history**, not a view of a conversation. It applies no compaction, no
+`context_edit` replacement, and no branch selection, and it never migrates anything — see
+"What this is not" below.
+
+The call is read-only: the file is opened with `readFile` and never through Pi's
+`SessionManager.open()`, which can rewrite a legacy file or append a missing newline.
+
+### Availability and invocation
+
+Registered with `exposure: "codemode"` and `annotations.readOnlyHint`, like `list_sessions`: callable
+from codemode scripts and listed by the `codemode` tool, never declared to the model. A script gets
+`structuredContent`, so `raw` costs context only if the script chooses to spend it.
+
+```js
+// in a codemode script
+const { entries, warnings } = await tools.session_entries({ sessionPath });
+```
+
+### Parameters
+
+| Parameter | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `sessionPath` | absolute path string | — | **Required.** A session `.jsonl` file under the sessions root — normally a `path` returned by `list_sessions`, including a nested subagent transcript path. |
+
+The path is confined to the sessions root, so this operation cannot read an arbitrary `.jsonl`:
+
+1. A relative path, or one containing `..` that leaves the root, throws.
+2. Confinement is decided with `realpath` on **both** sides. A symlink planted inside the root whose
+   target is outside it resolves to that target and throws — the rule follows the bytes, not the
+   spelling. A symlink that stays inside the root is fine.
+3. A path that cannot be resolved is reported by what the caller got wrong: outside the root is a
+   confinement error, inside it is `could not read session file`.
+4. Line 1 must be a session header. A file whose first line is not one throws `not a Pi session file`
+   — which is what keeps non-session `.jsonl` that live inside the root (a `subagent-artifacts/`
+   transcript dump, whose first line is `{"version":1,"recordType":"message",…}`) out. A missing or
+   unreadable root throws `sessions root is not readable`, and a header `version` that is present but
+   is not a positive integer throws too.
+5. A later line carrying `type: "session"` is **not** an entry: it is skipped with `invalid_entry`,
+   because line 1 is the only place a header belongs.
+
+Anything else about the file — a blank line, a truncated line, an entry from an unknown future Pi —
+is a warning, not an error.
+
+### Quick examples
+
+The last user prompt of the newest session, without reading the rest:
+
+```js
+const { sessions } = await tools.list_sessions({ sortDirection: "desc", limit: 1 });
+const { entries } = await tools.session_entries({ sessionPath: sessions[0].path });
+
+const user = entries.filter((e) => e.messageRole === "user").at(-1);
+return user?.raw.message.content;
+```
+
+Counting entry types across a session, keeping `raw` inside the script:
+
+```js
+const { entries, warnings } = await tools.session_entries({ sessionPath });
+const byType = entries.reduce((m, e) => m.set(e.type, (m.get(e.type) ?? 0) + 1), new Map());
+
+return { count: entries.length, byType: Object.fromEntries(byType), warnings };
+```
+
+Pairing a tool call with its result by id rather than by adjacency (a result is often not the direct
+child of its call):
+
+```js
+const { entries } = await tools.session_entries({ sessionPath });
+const calls = new Map();
+for (const e of entries) {
+  if (e.messageRole !== "assistant") continue;
+  for (const block of e.raw.message.content)
+    if (block.type === "toolCall") calls.set(block.id, { lineNo: e.lineNo, name: block.name });
+}
+
+return entries
+  .filter((e) => e.messageRole === "toolResult" && e.raw.message.isError)
+  .map((e) => ({ lineNo: e.lineNo, ...calls.get(e.raw.message.toolCallId) }));
+```
+
+### Result fields
+
+```ts
+type SessionEntriesOutput = {
+  entries: SessionFileEntry[];
+  warnings: SessionEntriesWarning[];
+};
+
+type SessionFileEntry = {
+  lineNo: number;              // physical line, >= 2; the handle that always resolves
+  id: string | null;           // entry id, or null when the file carries none
+  parentId: string | null;     // null for a root, an absent value, or a non-string
+  timestamp: string;           // entry timestamp, ISO 8601, validated
+  type: string;                // verbatim — an unknown type is preserved, not rejected
+  messageRole: string | null;  // role of a "message" entry, else null
+  raw: object;                 // the whole parsed line, unchanged
+};
+
+type SessionEntriesWarning = {
+  lineNo: number | null;       // null only for `legacy_version`, which describes the file
+  code: "invalid_json" | "invalid_entry" | "legacy_version";
+  reason: string;              // prose, not an enum
+};
+```
+
+| `code` | Raised when | Effect |
+| --- | --- | --- |
+| `invalid_json` | the line is blank, or does not parse | line skipped |
+| `invalid_entry` | the line parsed but is not an object, has no `type`, is a second header row, or has no real `timestamp` | line skipped |
+| `legacy_version` | the header `version` is absent or below 2 | nothing skipped; rows arrive with `id` and `parentId` `null`, because a version 1 file does not carry them |
+
+`raw` is the parsed line exactly as stored — Pi's fields, plus anything a newer Pi or an extension
+wrote, including fields this package has never seen. Nothing is decoded, re-encoded, reordered, or
+dropped from it.
+
+### What this is not
+
+- **Not the model's context.** No compaction summary replaces older entries, no `context_edit`
+  replacement is applied, and the stored leaf and active branch are ignored. `entries` is every line
+  in the file, including abandoned branches and the raw text that an edit later replaced. For
+  "what the model actually saw" you need Pi's `buildContextEntries`/`buildSessionProjection`, which
+  this package does not wrap yet.
+- **Not chronological.** `entries` is in **file order**, which is write order. A session whose leaf
+  was moved backwards interleaves branches, and a resumed subagent run appends. Sort by `timestamp`
+  yourself if you want time order — and pick deliberately between entry time and
+  `raw.message.timestamp`, which is Unix milliseconds for a message.
+- **Not tree-shaped.** `parentId` is returned, but no nesting is computed: a forked branch, an
+  orphan, and a linear run all look the same here.
+
+### Caller guarantees
+
+1. Line 1 is never returned, and `lineNo` is the **physical** line: a skipped line costs a warning
+   and shifts nothing.
+2. Every row has a `type` string and a validated ISO 8601 `timestamp`. `id` and `parentId` are
+   `string | null` and say what the file holds, not what Pi currently writes.
+3. `messageRole` is non-null only for `type === "message"`, and is the stored role verbatim —
+   including a role this package has never seen.
+4. Each skipped line produces exactly one warning, in line order, so `entries.length` plus skipped
+   lines accounts for the whole file.
+5. Nothing is written. The file is neither migrated nor repaired.
+
+### Limitations
+
+- **`raw` is unbounded.** The result is as large as the session file: measured 2026-10-02 on one
+  store, the largest session (2.4 MB) returned 356 entries and 2.46 MB of `raw`. Filter and project
+  inside a script; never return `entries` to a model, and never print `raw`.
+- **One whole file at a time.** There is no line range, entry-type filter, or byte budget; the scan
+  is a single `readFile`, so a huge session costs its full size in one call.
+- **`lineNo` is the only durable handle here, and it is durable only while the file is.** Pi appends
+  and `createBranchedSession` writes new files, so a line number is a citation into a snapshot, not
+  a permanent address. `id` is the stable handle for a v2+ file; in a v1 file it is `null` and a
+  freshly generated one would not survive to the next read — which is why this tool returns `null`
+  instead of minting an id.
+- **Header fields are checked only as far as this operation needs.** `list_sessions` requires a
+  non-empty `id` and `cwd` because it returns them; here a file whose header lacks them still reads,
+  because its entries are readable.
 

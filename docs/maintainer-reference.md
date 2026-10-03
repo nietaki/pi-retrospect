@@ -10,9 +10,10 @@ ratios or timings, never as store totals; a store grows daily.
 
 ## Maintainer reference
 
-The sections below are the implementation contract for `listSessions` (the exported
-function behind the registered `list_sessions` tool). Each states *how* a guarantee from the
-caller half is produced; the caller half states *what* is guaranteed.
+The sections below are the implementation contract for `listSessions` and `readSessionEntries` (the
+exported functions behind the registered `list_sessions` and `session_entries` tools). Each states
+*how* a guarantee from the caller half is produced; the caller half states *what* is guaranteed.
+Sections that name neither operation describe `listSessions`.
 
 ### TypeBox schemas
 
@@ -116,6 +117,26 @@ itself (`params.cwdMatch ?? "exact"`, `params.sortBy ?? "timestamp"`,
 `Type.Integer({ minimum: 1 })` is a documentation-and-validation hint, and `buildQuery`
 throws for a bad `limit` as well, so the exported function is safe when called directly.
 
+TypeBox **1.3.27** has no `Type.Nullable` and no `Type.Object` open-shape helper that keeps its
+TypeScript type. Two idioms cover both gaps, and both appear in `src/schemas.ts`:
+
+```ts
+// nullable field: a two-member union
+const NullableString = (description: string) =>
+  Type.Union([Type.String(), Type.Null()], { description });
+
+// arbitrary JSON: `Type.Unsafe`, because TypeBox infers `{}` from empty `properties`
+export const JsonObjectSchema = Type.Unsafe<JsonObject>({
+  type: "object",
+  additionalProperties: true,
+});
+```
+
+`Type.Unsafe<JsonObject>` is not decoration: Pi types `structuredContent` as `JsonValue`, and a
+`Record<string, unknown>` is not assignable to `JsonObject` (`unknown` is not a `JsonValue`), so the
+weaker type fails `tsc` on the tool's return value. `JsonObject` is exported by `pi-ai`, which is
+already a peer dependency.
+
 ### Implementation boundary
 
 The tool takes optional filter parameters; the implementation also takes the root, so tests
@@ -165,6 +186,67 @@ so tests can construct the registered shape against a fixture root instead of th
 `execute()` checks the `AbortSignal` between file reads and stops early; `details`
 mirrors `structuredContent`; `outputSchema` is declared so codemode callers receive JSON
 instead of prose.
+
+### `session_entries` boundary
+
+`src/session-entries.ts` exports `readSessionEntries(params, { sessionsRoot, signal })`;
+`src/session-entries-tool.ts` is the factory-wrapped tool, same shape as the listing. Confinement,
+header checks, and line mapping all live in the one module, because there is no query layer to
+separate from the walk.
+
+**Confinement** (`resolveSessionPath`) is the only security-relevant rule:
+
+1. `sessionPath` must be a non-empty string and `isAbsolute`. Nothing is resolved against the
+   process cwd, so the same call means the same file from any directory a script happens to sit in.
+2. `realpath(sessionsRoot)` runs first: a missing root is `sessions root is not readable`, matching
+   the way the listing reports it.
+3. `realpath(sessionPath)` runs second. If it throws, the path is checked **lexically**
+   (`within(root, resolve(sessionPath))`) purely to choose the message: outside the root is a
+   confinement error, inside it is `could not read session file`. A missing file must not look like
+   a policy violation.
+4. If it resolves, `within(root, file)` decides. This is the pass a symlink cannot fake: containment
+   is computed on resolved targets, so a link planted inside the root and aimed at `/etc/passwd`
+   resolves outside and throws. `within` treats the root itself as outside — a directory is not a
+   session file.
+
+**Header check** (`inspectHeaderLine`) is deliberately weaker than `validateHeaderLine` in
+`src/session-metadata.ts`, which the listing uses. The listing returns `id`, `cwd`, and `timestamp`,
+so it requires them; this operation returns none of them and reads only two facts from line 1 — that
+`type === "session"` and what `version` says. Reusing the strict validator would make an old header
+with an empty `cwd` hide a file whose entries are perfectly readable. What it does reject: a blank or
+unparseable line 1, a line that is not an object, a `type` that is not `"session"`, and a `version`
+that is present but not a positive integer.
+
+**Line splitting** keeps physical numbering: `content.split("\n")`, one trailing empty element dropped
+(a terminating newline is not a line), a leading BOM stripped before the split, and a single trailing
+`\r` removed per line so CRLF files read cleanly. Line 1 is consumed by the header check; the loop
+starts at index 1 and reports `index + 1` as `lineNo`.
+
+**Entry acceptance** (`toEntry`) separates "addressable" from "describable":
+
+| Field | Rule |
+| --- | --- |
+| `type` | must be a non-empty string and not `"session"`, else `invalid_entry` — a row nobody can name, or a header that has drifted off line 1 |
+| `timestamp` | must be a string passing `isRealTimestamp`, else `invalid_entry` — a row nobody can place in time |
+| `id` | non-empty string, else `null`. Never rejects a line |
+| `parentId` | non-empty string, else `null` (a root, an absent field, or a non-string all read as null) |
+| `messageRole` | the `message.role` string when `type === "message"`, else `null` |
+| `raw` | the parsed line, cast to `JsonObject` — safe by construction, it came from `JSON.parse` |
+
+`id` and `parentId` are absent rather than wrong, so they cannot be acceptance criteria: version 1
+files, extension-written entries, and a partially migrated file all legitimately lack them and are
+still readable. `isRealTimestamp` is shared with the listing precisely so `2026-02-30` does not roll
+over into March and reach the output as a timestamp.
+
+**Version 1 is reported, never migrated.** `migrateSessionEntries` mints fresh random ids on every
+call (`generateId` is collision-checked within one pass only), so a migrated id would look like a
+durable citation and resolve to nothing on the next read. The reader therefore returns the file as
+stored — `id: null`, `parentId: null` — plus one `legacy_version` warning with `lineNo: null`, and
+leaves `lineNo` as the only handle. `SessionManager.open()` is never used for the same reason it is
+never used in the listing: it rewrites.
+
+**Abort** is checked before resolving the path and again per line, so a huge file can be abandoned
+mid-map rather than only before or after it.
 
 ### Discovery rules
 
@@ -303,7 +385,23 @@ defineTool({
   exposure: "codemode",
   annotations: { readOnlyHint: true },
 });
+
+defineTool({
+  name: "session_entries",
+  label: "Session Entries",
+  description: "...",
+  parameters: SessionEntriesParamsSchema,
+  outputSchema: SessionEntriesOutputSchema,
+  exposure: "codemode",
+  annotations: { readOnlyHint: true },
+});
 ```
+
+`src/index.ts` registers both against the same `join(getAgentDir(), "sessions")` root. The
+`session_entries` description must keep stating what a caller cannot infer from one string
+parameter: that the path is confined to the sessions root, that line 1 is the header and is never
+returned, that `raw` is the whole line and can be megabytes, that entries arrive in file order with
+every branch included, and that version 1 rows come back with null ids.
 
 The registered `description` must keep telling the caller what it cannot infer from the
 shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
@@ -343,6 +441,22 @@ Warnings (2)
 - `Warnings (N)` section only when there is at least one warning.
 - No row cap and no truncation: the list is bounded by the number of sessions, and the JSON
   is available to scripts regardless.
+
+`session_entries` renders an index of lines and never a payload — one `lineNo type role id` bullet
+per row, with `raw` left out entirely because a single entry can exceed the context window:
+
+```
+Entries (2)
+- 2 message user aaaa1111
+- 3 model_change
+
+Warnings (2)
+- file legacy_version: session version 1: id and parentId are absent in the file
+- line 7 invalid_json: line is not valid JSON: Unexpected end of JSON input
+```
+
+A null `messageRole` or null `id` simply leaves that column out rather than printing `null`. The
+warning prefix is `file` or `line N`, matching the `lineNo: null` / `lineNo: n` split in the JSON.
 
 ### Testing policy
 
@@ -398,6 +512,26 @@ discovered, 0 warnings, unique paths and ids, ordering correct, and the whole wa
 completes in roughly 200 ms. Running subagent workflows here is still the way to grow real
 parent/child trees for spot-checks — see TODOs.
 
+`session_entries` is covered by `test/session-entries.test.ts` (confinement, header rules, physical
+line numbers, arbitrary `raw`, the three warning codes, v1 nulls, abort) and
+`test/session-entries-tool.test.ts` (registration shape, open `raw` subschema, structured output
+equality, rendered rows, entry point registering both tools), plus a describe block in
+`test/content.test.ts` for `renderSessionEntriesContent` (row columns, no `raw` leak, the empty
+header, and the `file` versus `line N` warning prefixes). Its fixtures are throwaway files under
+`test/tmp/session-entries*/` written by the tests themselves, not entries in
+`test/fixtures/sessions/`: adding a multi-entry file there would change the row and warning counts
+that `test/list-sessions.test.ts` asserts exactly.
+
+Live-store spot-checks live in `scratch/` (not the suite, not the tarball, and never asserted on):
+`node --experimental-strip-types scratch/entries-smoke.mts` reads one real session and rejects
+`/etc/hosts`; `scratch/entries-size.mts` reports what the largest sessions return;
+`scratch/entries-store.mts` reads every parent session; `scratch/entries-artifacts.mts` walks every
+`.jsonl` under the root recursively. Measured 2026-10-02: of 212 `.jsonl` files under the root, 203
+(parents and child transcripts) read with **0 warnings** across 15,744+ entries in ~310 ms, and the
+remaining 9 — the `subagent-artifacts/*_transcript.jsonl` dumps — were all refused by the header
+check with no other error class appearing. `raw` came back within a hair of the file size (2.46 MB
+from a 2.4 MB session), which is the number behind the unbounded-`raw` limitation.
+
 ### Implementation guarantees
 
 Restated from the caller half as properties a change must not break: a total, reproducible
@@ -410,6 +544,14 @@ against `pi-subagents` 0.74.0); `path` as the stable handle because `id` may rep
 history; and orphaned `--<slug>--` stems left unvisited, so only files reachable from a
 discovered session are considered.
 
+For `session_entries`: `sessionPath` is confined to the sessions root by `realpath` containment on
+both sides, so no spelling or symlink route reaches a file outside it; line 1 is validated as a
+session header and never returned; `lineNo` is the physical line and survives skipped lines;
+nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated when
+the file does not carry them; every returned row has a real `type` and a validated `timestamp`;
+unknown types, unknown roles, and unknown fields pass through `raw` untouched; and one skipped line
+produces exactly one warning.
+
 ---
 
 ## TODOs
@@ -419,6 +561,12 @@ discovered session are considered.
   subagent, so the recursive case is unexercised. Once a nested launch exists, confirm the
   convention — whether a child's own stem directory appears as `…/run-0/<child-stem>/…` —
   and that containment-based grouping does not attach a deep transcript to two parents.
+- **Bound `session_entries` `raw`.** One call returns the whole file: measured 2.46 MB of `raw`
+  from a 2.4 MB session, and `structuredContent` has no size cap, so a script that hands the rows
+  back verbatim can spend more than the context window it is reading. Deferred parameters, not
+  chosen yet: a row range (`startLine` plus `limit`, which composes with the physical `lineNo` the
+  tool already promises) or a byte budget with an offset continuation. The decision that follows: a
+  capped read reported as a warning, as a `complete: false` field, or as nothing at all.
 - **Generate real fixture data.** Run subagent workflows in this project's `cwd` so that
   project's `--<slug>--/` session directory grows actual parent/child trees, then use them
   to check the synthetic layout against reality. Do not commit the output.
@@ -447,3 +595,11 @@ discovered session are considered.
   `path` rather than `id`, but `description` in `src/list-sessions-tool.ts` lists the fields
   without saying which identifies a transcript. Worth one clause, since a caller reading
   only the description has no other way to learn it.
+- **A context view, if ever wanted.** `session_entries` returns stored history: every branch, no
+  compaction, `context_edit` unreplaced. The other question — what the model actually saw — needs
+  Pi's `buildContextEntries` / `buildSessionProjection` over the same entries, which those exported
+  free functions allow without `SessionManager.open()`. That is a second operation with its own
+  contract, not a parameter on this one, and it stays unbuilt until it is discussed.
+- **Entry-id addressing.** `parentId` comes back but no tree is computed, so a caller that wants one
+  branch root→leaf either walks ids in a script or waits for a `fromId`-style parameter. If
+  citations by entry id become the norm, decide whether the reader or a future view owns that.

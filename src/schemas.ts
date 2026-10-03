@@ -4,7 +4,7 @@
  * Contract: docs/tool-api.md
  */
 
-import { Type, type Static } from "@earendil-works/pi-ai";
+import { Type, type JsonObject, type Static } from "@earendil-works/pi-ai";
 
 /**
  * Top-level session field the result is ordered by. Children always stay timestamp ascending.
@@ -132,6 +132,95 @@ export const ListSessionsOutputSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** This TypeBox release has no `Type.Nullable`; a nullable string is this union. */
+const NullableString = (description: string) =>
+  Type.Union([Type.String(), Type.Null()], { description });
+
+/**
+ * The parsed line, unchanged: Pi's own fields plus whatever a newer Pi or an extension wrote.
+ *
+ * Open on purpose. `Type.Unsafe` carries the TypeScript type because TypeBox infers `{}` from
+ * empty `properties`, which would drop every field the reader just preserved.
+ */
+export const JsonObjectSchema = Type.Unsafe<JsonObject>({
+  type: "object",
+  additionalProperties: true,
+  description:
+    "The whole JSON object from that physical line, verbatim: every Pi field, and every unknown field a newer Pi or an extension wrote.",
+});
+
+/**
+ * One session entry with the metadata needed to cite it.
+ *
+ * `lineNo` is the durable handle. Pi writes `id` and `parentId` from session version 2 on, so
+ * both are `null` in a version 1 file, where they would otherwise be regenerated per read.
+ */
+export const SessionFileEntrySchema = Type.Object(
+  {
+    lineNo: Type.Integer({
+      minimum: 2,
+      description: "Physical 1-based line number; line 1 is the header and is never returned",
+    }),
+    id: NullableString("Entry id, or null when the file carries none"),
+    parentId: NullableString("Entry parentId; null for a root, an absent value, or a non-string"),
+    timestamp: Type.String({
+      format: "date-time",
+      description: "Entry timestamp, copied after ISO 8601 validation",
+    }),
+    type: Type.String({
+      description: "Entry type, verbatim: unknown future types are preserved, not rejected",
+    }),
+    messageRole: NullableString('Message role of a "message" entry, else null'),
+    raw: JsonObjectSchema,
+  },
+  { additionalProperties: false, description: "One session entry, with its raw JSON" },
+);
+
+/**
+ * A line or a file that did not become an entry. `code` is machine-readable, `reason` is prose.
+ * `lineNo` is null only for `legacy_version`, which describes the whole file.
+ */
+export const SessionEntriesWarningSchema = Type.Object(
+  {
+    lineNo: Type.Union([Type.Integer({ minimum: 2 }), Type.Null()], {
+      description: "Physical line number, or null when the warning describes the whole file",
+    }),
+    code: Type.Union(
+      [Type.Literal("invalid_json"), Type.Literal("invalid_entry"), Type.Literal("legacy_version")],
+      {
+        description:
+          '"invalid_json": the line is blank or does not parse. "invalid_entry": it parsed but has no usable type or timestamp. "legacy_version": the session predates version 2, so entry ids are absent.',
+      },
+    ),
+    reason: Type.String({ description: "Human-readable detail; not an enum" }),
+  },
+  { additionalProperties: false, description: "One skipped line, or one whole-file condition" },
+);
+
+/** Parameters for `readSessionEntries`: the single session file to read. */
+export const SessionEntriesParamsSchema = Type.Object(
+  {
+    sessionPath: Type.String({
+      minLength: 1,
+      description:
+        "Absolute path to a session .jsonl file under the sessions root. A path outside the root, a relative path, a `..` traversal, and a symlink whose target leaves the root all throw.",
+    }),
+  },
+  { additionalProperties: false },
+);
+
+/**
+ * Result of `readSessionEntries`: entries in physical file order, plus one warning per line or
+ * file that produced none.
+ */
+export const SessionEntriesOutputSchema = Type.Object(
+  {
+    entries: Type.Array(SessionFileEntrySchema),
+    warnings: Type.Array(SessionEntriesWarningSchema),
+  },
+  { additionalProperties: false },
+);
+
 export type ListSessionsParams = Static<typeof ListSessionsParamsSchema>;
 export type CwdMatch = Static<typeof CwdMatchSchema>;
 export type SessionSortField = Static<typeof SessionSortFieldSchema>;
@@ -139,3 +228,8 @@ export type SortDirection = Static<typeof SortDirectionSchema>;
 export type SessionMetadata = Static<typeof SessionMetadataSchema>;
 export type ListSessionsWarning = Static<typeof ListSessionsWarningSchema>;
 export type ListSessionsOutput = Static<typeof ListSessionsOutputSchema>;
+export type SessionFileEntry = Static<typeof SessionFileEntrySchema>;
+export type SessionEntriesWarning = Static<typeof SessionEntriesWarningSchema>;
+export type SessionEntriesWarningCode = SessionEntriesWarning["code"];
+export type SessionEntriesParams = Static<typeof SessionEntriesParamsSchema>;
+export type SessionEntriesOutput = Static<typeof SessionEntriesOutputSchema>;

@@ -107,13 +107,16 @@ describe("list_sessions tool execution", () => {
 });
 
 describe("extension entry point", () => {
-  it("registers exactly the list_sessions tool", async () => {
+  it("registers list_sessions and session_entries", async () => {
     const registered: Array<{ name: string; description: string }> = [];
     const { default: extension } = await import("../src/index.ts");
 
     extension(fakeExtensionApi(registered));
 
-    expect(registered.map((definition) => definition.name)).toStrictEqual(["list_sessions"]);
+    expect(registered.map((definition) => definition.name)).toStrictEqual([
+      "list_sessions",
+      "session_entries",
+    ]);
     expect(typeof registered[0]?.description).toBe("string");
     expect(registered[0]?.description.length).toBeGreaterThan(0);
   });

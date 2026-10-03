@@ -6,10 +6,10 @@ self-improvement. An agent that can look back over its own previous sessions can
 the conversation where it hit a given error, recover a decision it made, and audit
 what actually happened before repeating it.
 
-**Status: 0.x, early.** One operation is implemented — `listSessions` (see
-[`docs/tool-api.md`](docs/tool-api.md) for its contract), registered as one
-codemode-callable tool. Exploring the *messages* inside a session is not built yet;
-that product scope stays open until it is discussed.
+**Status: 0.x, early.** Two operations are implemented — `list_sessions` (find session files) and
+`session_entries` (read the entries inside one), both codemode-callable; see
+[`docs/tool-api.md`](docs/tool-api.md) for their contracts. Anything beyond reading history —
+searching it, ranking it, or writing back — stays out of scope until it is discussed.
 
 ## Install
 
@@ -33,11 +33,13 @@ so the minimum is stated here rather than in `package.json`.
 
 ## Using it
 
-The registered tool is `list_sessions`. It walks the Pi sessions root, reads only
-each file's header line, and returns session metadata — id, absolute path, absolute
-`cwd`, timestamp, fork lineage (`parentSessionPath`) — with subagent transcripts
-nested under the session that launched them, plus a warning for every file it had to
-skip.
+Two tools register, and they chain: `list_sessions` names transcript files, `session_entries` opens
+one of them.
+
+**`list_sessions`** walks the Pi sessions root, reads only each file's header line, and returns
+session metadata — id, absolute path, absolute `cwd`, timestamp, fork lineage
+(`parentSessionPath`) — with subagent transcripts nested under the session that launched them, plus
+a warning for every file it had to skip.
 
 All of its parameters are optional, and all of them act on **top-level** sessions — a
 matching parent always arrives with its complete subagent tree:
@@ -74,10 +76,35 @@ the tool directly. This is deliberate — the result is structured JSON that a s
 can filter before it costs context — but it does mean the tool is invisible to a
 session running without codemode.
 
+**`session_entries`** takes one parameter, `sessionPath`, and returns every entry of that file:
+`{ lineNo, id, parentId, timestamp, type, messageRole, raw }`, where `raw` is the whole parsed JSON
+line unchanged. Line 1 is the session header and is never returned, so `lineNo` starts at 2 and a
+malformed line costs a warning without shifting the lines after it. Unknown entry types and unknown
+message roles come back verbatim, and the call cannot leave the sessions root — a relative path, a
+`..` traversal, a symlink that resolves outside it, and a file whose first line is not a session
+header all throw.
+
+```js
+// in a codemode script — filter `raw` in the script, never hand it to a model
+const { sessions } = await tools.list_sessions({ sortDirection: "desc", limit: 1 });
+const { entries, warnings } = await tools.session_entries({ sessionPath: sessions[0].path });
+
+if (warnings.length > 0) return { skipped: warnings.length, warnings };
+
+return entries
+  .filter((entry) => entry.messageRole === "assistant")
+  .map((entry) => ({ lineNo: entry.lineNo, stopReason: entry.raw.message.stopReason }));
+```
+
+`raw` is unbounded — as large as the file behind it (a 2.4 MB session returned 2.46 MB of `raw`) —
+so it is a codemode-only tool by design. It reads stored history: no compaction, no `context_edit`,
+no branch selection is applied, so it is not the model's context view.
+
 ## Reference
 
 - [`docs/tool-api.md`](docs/tool-api.md) — the contract for the operations this
-  package exposes, including `listSessions`, its discovery rules, and its guarantees.
+  package exposes: `list_sessions` (discovery rules, filters, ordering, guarantees) and
+  `session_entries` (sessions-root confinement, line addressing, `raw`, warning codes).
 - `test/fixtures/generate.mjs` (source repository, not in the npm tarball) — rebuilds
   the synthetic session tree the tests run against.
 

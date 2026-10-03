@@ -1,14 +1,15 @@
 /**
  * Covers `renderListSessionsContent`: path rows with nesting indentation, the conditional
- * warnings section, and the empty-store header.
+ * warnings section, and the empty-store header. Also covers `renderSessionEntriesContent`:
+ * line-numbered entry rows with no raw payload, and its line-level plus file-level warnings.
  *
  * Contract: docs/tool-api.md
  */
 
 import { describe, expect, it } from "vitest";
 
-import { renderListSessionsContent } from "../src/content.ts";
-import type { ListSessionsOutput } from "../src/schemas.ts";
+import { renderListSessionsContent, renderSessionEntriesContent } from "../src/content.ts";
+import type { ListSessionsOutput, SessionEntriesOutput, SessionFileEntry } from "../src/schemas.ts";
 
 const TREE: ListSessionsOutput = {
   sessions: [
@@ -104,5 +105,65 @@ describe("renderListSessionsContent", () => {
     // 1 header + 4 session rows (2 roots, 1 child, 1 grandchild) + blank + warnings header
     // + 2 warning rows.
     expect(text.split("\n")).toHaveLength(9);
+  });
+});
+
+const MESSAGE_ROW: SessionFileEntry = {
+  lineNo: 2,
+  id: "aaaa1111",
+  parentId: null,
+  timestamp: "2026-01-01T10:00:01.000Z",
+  type: "message",
+  messageRole: "user",
+  raw: { id: "aaaa1111", message: { content: "SECRET PAYLOAD" } },
+};
+
+const ADDRESSLESS_ROW: SessionFileEntry = {
+  ...MESSAGE_ROW,
+  lineNo: 3,
+  id: null,
+  type: "model_change",
+  messageRole: null,
+  raw: {},
+};
+
+describe("renderSessionEntriesContent", () => {
+  it("indexes rows by line, type, role, and id without rendering raw", () => {
+    const output: SessionEntriesOutput = { entries: [MESSAGE_ROW, ADDRESSLESS_ROW], warnings: [] };
+
+    expect(renderSessionEntriesContent(output)).toBe(
+      ["Entries (2)", "- 2 message user aaaa1111", "- 3 model_change"].join("\n"),
+    );
+  });
+
+  it("never leaks a raw payload into the text", () => {
+    const text = renderSessionEntriesContent({ entries: [MESSAGE_ROW], warnings: [] });
+
+    expect(text).not.toContain("SECRET PAYLOAD");
+    expect(text).not.toContain("raw");
+  });
+
+  it("omits the warnings section when there are none", () => {
+    expect(renderSessionEntriesContent({ entries: [], warnings: [] })).toBe("Entries (0)");
+  });
+
+  it("names the line for a line warning and the file for a file warning", () => {
+    const text = renderSessionEntriesContent({
+      entries: [],
+      warnings: [
+        { lineNo: null, code: "legacy_version", reason: "session version 1: ids absent" },
+        { lineNo: 7, code: "invalid_json", reason: "line is not valid JSON" },
+      ],
+    });
+
+    expect(text).toBe(
+      [
+        "Entries (0)",
+        "",
+        "Warnings (2)",
+        "- file legacy_version: session version 1: ids absent",
+        "- line 7 invalid_json: line is not valid JSON",
+      ].join("\n"),
+    );
   });
 });
