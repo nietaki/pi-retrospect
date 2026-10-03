@@ -8,6 +8,7 @@
   `npm test` (or `npm run coverage` for the v8 report over every `src` module), and let
   `npm run check` stay the gate that runs the suite together with `tsc --noEmit`. Tests may
   write throwaway fixtures under `test/tmp/`, which is gitignored.
+- `test/tmp/` is generated state and must never be a precondition: every test purges or writes the scratch path it asserts on before asserting on it, `test/global-setup.ts` (Vitest `globalSetup`) removes `test/tmp/` at the start of each run, and `npm run clean` (first step of `npm run check`) purges it on demand. Do not add a scratch assertion that depends on a path being empty or absent unless the same test creates or removes that path, and do not run two Vitest suites in the same checkout at once — the start-of-run purge is not concurrency-safe.
 - Prefer documented Pi APIs and extension integration points over assumptions about the user's filesystem, configuration, or environment. Check current Pi documentation and types when choosing an API.
 - Keep dependencies minimal. Add runtime dependencies only when required and justified.
 - Keep tests and type-checking passing with `npm run check`.

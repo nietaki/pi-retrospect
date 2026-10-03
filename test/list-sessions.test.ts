@@ -9,7 +9,7 @@
  * Contract: docs/tool-api.md
  */
 
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -19,7 +19,11 @@ import type { ListSessionsOutput, SessionMetadata } from "../src/schemas.ts";
 
 const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
 
-/** Scratch paths under `test/tmp/`, never committed: the empty-root case writes here. */
+/**
+ * Scratch paths under `test/tmp/`, never committed. Each case below owns its precondition:
+ * it purges the path it needs before asserting on it, so a stale tree left by an interrupted
+ * or older run can never satisfy or break the assertion by accident.
+ */
 const TMP = new URL("tmp/", import.meta.url).pathname;
 
 /** `00000000-0000-4000-8000-0000000000NN` -> NN, so expectations read as short labels. */
@@ -215,7 +219,11 @@ describe("listSessions warnings", () => {
   it("resolves a relative sessionsRoot before naming it in a warning", async () => {
     // Every returned path is documented as absolute, including warning paths, so a caller
     // given a relative root still gets a path it can read back.
-    const root = join(`${TMP}list-sessions-relative-root`, "absent-store");
+    // Purge the parent first: the case asserts the store is unreadable, which only means
+    // something if no earlier run left a tree at exactly that path.
+    const storeParent = `${TMP}list-sessions-relative-root`;
+    await rm(storeParent, { recursive: true, force: true });
+    const root = join(storeParent, "absent-store");
     const output = await listSessions({}, { sessionsRoot: relative(process.cwd(), root) });
 
     expect(output.sessions).toStrictEqual([]);
@@ -227,6 +235,7 @@ describe("listSessions warnings", () => {
 
   it("returns nothing and warns about nothing for an empty sessions root", async () => {
     const root = `${TMP}list-sessions-empty-root`;
+    await rm(root, { recursive: true, force: true });
     await mkdir(root, { recursive: true });
 
     const output = await listSessions({}, { sessionsRoot: root });

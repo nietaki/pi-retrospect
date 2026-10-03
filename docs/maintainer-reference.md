@@ -374,6 +374,25 @@ rows with children whose `cwd` and timestamp fall outside the filter. Keeping th
 out of `test/fixtures/sessions/` protects the whole-store assertions in
 `test/list-sessions.test.ts`, which count rows and warnings exactly.
 
+`test/tmp/` is generated state: nothing in it is committed, and no run may depend on what an
+earlier run left behind. Three mechanisms enforce that, from strongest to weakest. **Every
+scratch consumer owns its precondition** — `makeStore` removes its tree before rebuilding it,
+`session-metadata.test.ts` truncates each numbered file as it writes it, and the empty-root
+and absent-store cases in `test/list-sessions.test.ts` purge the path they assert on before
+asserting, so the guarantee holds per test and survives a crashed run or a single-file run.
+**`test/global-setup.ts`**, registered as Vitest `globalSetup`, removes
+`test/tmp/` once before any test file is collected, which extends the fresh-tmp guarantee to
+`npm test`, `npm run coverage`, `vitest run <file>`, and CI rather than only to the
+`npm run check` entry point. **`npm run clean`** — the first step of `npm run check` — removes
+`test/tmp/` for humans; it touches nothing else, so `coverage/` and `dist/` survive it, and
+there is no teardown purge so a failing run's artifacts stay on disk to inspect. Verified both
+ways: the suite is green with `test/tmp/` absent, as on a fresh clone, and green with stale
+session trees planted under `test/tmp/`.
+
+Caveat, and the reason the per-test purge is the primary mechanism rather than the hook: a
+start-of-run purge of a shared root is unsafe against **two Vitest runs in the same checkout**
+— the later run wipes the earlier one's scratch mid-flight. Run one suite at a time per worktree.
+
 Measured against the **live** store on this machine: every parent and child transcript
 discovered, 0 warnings, unique paths and ids, ordering correct, and the whole walk
 completes in roughly 200 ms. Running subagent workflows here is still the way to grow real

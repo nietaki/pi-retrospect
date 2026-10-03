@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { defineConfig } from "vitest/config";
 
 // Vitest configuration.
@@ -10,6 +12,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
+    // Purges the gitignored `test/tmp/` once, before any test file is collected, so no run can
+    // read state an earlier run left behind. Absolute path: independent of the process cwd.
+    globalSetup: [fileURLToPath(new URL("./test/global-setup.ts", import.meta.url))],
     coverage: {
       provider: "v8",
       // Report every src module, including ones no test imports, so blind spots are visible.
