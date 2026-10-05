@@ -296,8 +296,9 @@ It is a **reader of stored history**, not a view of a conversation. It applies n
 `context_edit` replacement, and no branch selection, and it never migrates anything — see
 "What this is not" below.
 
-The call is read-only: the file is opened with `readFile` and never through Pi's
-`SessionManager.open()`, which can rewrite a legacy file or append a missing newline.
+The call is read-only: the file is streamed line by line with `FileHandle#readLines()` and never
+opened through Pi's `SessionManager.open()`, which can rewrite a legacy file or append a missing
+newline.
 
 ### Availability and invocation
 
@@ -430,7 +431,9 @@ dropped from it.
 ### Caller guarantees
 
 1. Line 1 is never returned, and `lineNo` is the **physical** line: a skipped line costs a warning
-   and shifts nothing.
+   and shifts nothing. A line break is LF, CRLF, or a lone CR — the rule Node's readline applies — and
+   Pi writes LF, so for any file Pi produced this is `\n` counting. Only a hand-edited file with mixed
+   endings numbers differently than `wc -l` would.
 2. Every row has a `type` string and a `timestamp` the session parser can read. `id` and `parentId` are
    `string | null`, and the null is about citability rather than contents: a value appears only when
    the header `version` is at least 2, because Pi replaces every id when it migrates a version 1
@@ -446,8 +449,9 @@ dropped from it.
 - **`raw` is unbounded.** The result is as large as the session file: measured 2026-10-02 on one
   store, the largest session (2.4 MB) returned 356 entries and 2.46 MB of `raw`. Filter and project
   inside a script; never return `entries` to a model, and never print `raw`.
-- **One whole file at a time.** There is no line range, entry-type filter, or byte budget; the scan
-  is a single `readFile`, so a huge session costs its full size in one call.
+- **No range, no filter, no byte budget.** There is no line range, entry-type filter, or limit: the
+  scan takes the whole file. It streams, so the file's bytes are not held at once, but the **result**
+  is held whole — `entries` carrying `raw` is as large as the session, which is the cost that matters.
 - **`lineNo` is the only durable handle here, and it is durable only while the file is.** Pi appends
   and `createBranchedSession` writes new files, so a line number is a citation into a snapshot, not
   a permanent address. `id` is the stable handle for a v2+ file; in a version 1 file it is `null`

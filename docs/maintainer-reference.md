@@ -212,7 +212,7 @@ separate from the walk.
    is computed on resolved targets, so a link planted inside the root and aimed at `/etc/passwd`
    resolves outside and throws. `within` treats the root itself as outside — a directory is not a
    session file.
-5. The **resolved** path is what `readFile` opens, so replacing `sessionPath` with a different symlink
+5. The **resolved** path is what `open()` opens, so replacing `sessionPath` with a different symlink
    after step 3 cannot redirect this read. A target swapped after resolution is not defended (no
    `O_NOFOLLOW`), which is the residual window; it only matters against a concurrent writer inside the
    operator's own sessions root, which is not the threat this confinement exists for.
@@ -225,10 +225,34 @@ with an empty `cwd` hide a file whose entries are perfectly readable. What it do
 unparseable line 1, a line that is not an object, a `type` that is not `"session"`, and a `version`
 that is present but not a positive integer.
 
-**Line splitting** keeps physical numbering: `content.split("\n")`, one trailing empty element dropped
-(a terminating newline is not a line), a leading BOM stripped before the split, and a single trailing
-`\r` removed per line so CRLF files read cleanly. Line 1 is consumed by the header check; the loop
-starts at index 1 and reports `index + 1` as `lineNo`.
+**Line reading** streams instead of slurping: `FileHandle#readLines()` (Node's readline) yields one
+line at a time, so the scan costs the entries it produces rather than the file's size in memory — on a
+47 MB / 12k-entry session, measured 2026-10-05 on Node 22.22.1, peak RSS 246 MB → 148 MB and wall time
+70 ms → 106 ms. The saving is roughly two copies of the file (the whole string plus the lines array),
+not the file: `raw` retains every parsed line whatever the reader does. That makes it a stress-case
+number — on a real 1.5 MB / 424-entry session the same measurement is 80 MB → 73 MB and 8 ms → 14 ms,
+so ordinary sessions feel no difference either way, and the three live files checked read
+byte-identically. Node decides where a
+line ends, and it counts `\n`, `\r\n`, **and a lone `\r`** as breaks; `crlfDelay` does not change that,
+only whether a `\r\n` pair is one break or two. Pi writes `\n`, so this is `\n` counting for every file
+Pi produces, and the `lineNo` of a hand-edited file with a stray `\r` follows readline rather than
+`wc -l`. Deliberate trade: keeping the old LF-only rule meant re-implementing the split over chunk
+streams, and the two lines that ever disagreed are exactly the ones the reader would only warn on
+anyway. A terminating break produces no final line, a blank line does yield, and the counter is
+incremented per line rather than derived from an index, so `lineNo` stays physical across skipped rows.
+The BOM is stripped from line 1 only, where a whole-file strip would have put it, and an empty file
+yields **no** lines — the loop's `headerRead` flag is what turns "there was no line 1" into
+`not a Pi session file: first line is empty`, the message the old `splitLines` produced directly.
+The header is consumed as line 1, so its `version` gates `addressable` before any later line is read;
+`legacy_version` is pushed then, which keeps it first in `warnings`. The handle is closed in a
+`finally`, and a read failure is reported as `could not read session file`, which is what a directory
+name costs (Node opens a directory, then fails the first read with `EISDIR`).
+
+The switch was checked by running the whole-file reader and this one over a 26-file corpus — blank
+lines anywhere, CRLF, LF-only tails, BOM on line 1 and on a later line, a lone CR, unparseable and
+non-object lines, a stray header row, v1/v2/versionless headers, tabs, multi-byte content, a 200 KB
+line — and diffing `entries` plus `warnings`. 25 files matched exactly; the lone CR was the only
+difference, and it is the accepted rule above, not an accident.
 
 **Entry acceptance** (`toEntry`) separates "addressable" from "describable":
 
@@ -571,8 +595,9 @@ discovered session are considered.
 
 For `session_entries`: `sessionPath` is confined to the sessions root by `realpath` containment on
 both sides, so no spelling or symlink route reaches a file outside it; line 1 is validated as a
-session header and never returned; `lineNo` is the physical line and survives skipped lines;
-nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated whenever
+session header and never returned; `lineNo` is the physical line and survives skipped lines (a line
+break is LF, CRLF, or a lone CR — Node's readline rule, which is `\n` counting for every file Pi
+writes); nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated whenever
 the file cannot supply a citable one — an absent id, and *any* id in a file older than version 2, which
 Pi replaces on migration; every returned row has a real `type` and a validated `timestamp`;
 unknown types, unknown roles, and unknown fields pass through `raw` untouched; and one skipped line

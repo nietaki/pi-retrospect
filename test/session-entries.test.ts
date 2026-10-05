@@ -8,7 +8,7 @@
  * Contract: docs/tool-api.md
  */
 
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -130,6 +130,30 @@ describe("readSessionEntries sessions-root confinement", () => {
     await expect(firstEntry()).rejects.toThrow(/could not read session file/);
   });
 
+  it("rejects a file inside the root that cannot be opened", async () => {
+    // Confinement is satisfied — the realpath resolves inside the root — so an unreadable file is a
+    // read failure rather than a policy violation. Streaming splits this from the directory case:
+    // `open()` succeeds on both, and only a file the process cannot read fails here.
+    await writeSession([entry()]);
+
+    // Running as root ignores permission bits, and some filesystems have none.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    try {
+      await chmod(SESSION, 0o000);
+    } catch {
+      return; // no permission bits to set: the case is not expressible here
+    }
+
+    try {
+      await readFile(SESSION, "utf8");
+      return; // still readable, so the mode did not take effect and the case is not expressible
+    } catch {
+      // Expected: the file is genuinely unreadable, which is what this test needs.
+    }
+
+    await expect(firstEntry()).rejects.toThrow(/could not read session file/);
+  });
+
   it("rejects a missing sessions root", async () => {
     await writeSession([entry()]);
 
@@ -186,7 +210,16 @@ describe("readSessionEntries header handling", () => {
     await mkdir(dirname(SESSION), { recursive: true });
     await writeFile(SESSION, "");
 
-    await expect(firstEntry()).rejects.toThrow(/not a Pi session file/);
+    await expect(firstEntry()).rejects.toThrow(/not a Pi session file: first line is empty/);
+  });
+
+  it("rejects a file that holds nothing but a line break", async () => {
+    // `readLines` yields one blank line here, so line 1 exists and the header check is what refuses
+    // it — the same message the empty file gets from a different place.
+    await mkdir(dirname(SESSION), { recursive: true });
+    await writeFile(SESSION, "\n");
+
+    await expect(firstEntry()).rejects.toThrow(/not a Pi session file: first line is empty/);
   });
 
   it("rejects a file whose first line is not a session header", async () => {
@@ -235,6 +268,19 @@ describe("readSessionEntries header handling", () => {
     const result = await firstEntry();
 
     expect(result.entries).toHaveLength(1);
+  });
+
+  it("strips a byte-order mark from line 1 only", async () => {
+    // The BOM belongs to the file, not to a line in it, so a later line keeps it and fails to parse.
+    await mkdir(dirname(SESSION), { recursive: true });
+    await writeFile(SESSION, `${header()}\n\uFEFF${entry()}\n`);
+
+    const result = await firstEntry();
+
+    expect(result.entries).toStrictEqual([]);
+    expect(result.warnings.map((warning) => [warning.lineNo, warning.code])).toStrictEqual([
+      [2, "invalid_json"],
+    ]);
   });
 });
 
@@ -348,6 +394,38 @@ describe("readSessionEntries entry mapping", () => {
 
     expect(result.entries.map((row) => row.id)).toStrictEqual(["crlf"]);
     expect(result.warnings).toStrictEqual([]);
+  });
+
+  it("counts a lone carriage return as a line break", async () => {
+    // Node's readline splits on LF, CRLF and a lone CR alike, so `lineNo` follows that rule rather
+    // than `\n` alone. Pi writes LF, which is why this is only reachable in a hand-edited file.
+    await mkdir(dirname(SESSION), { recursive: true });
+    await writeFile(SESSION, `${header()}\n${entry({ id: "a1" })}\nx\ry\n${entry({ id: "a2" })}\n`);
+
+    const result = await firstEntry();
+
+    expect(result.entries.map((row) => [row.lineNo, row.id])).toStrictEqual([
+      [2, "a1"],
+      [5, "a2"],
+    ]);
+    expect(result.warnings.map((warning) => [warning.lineNo, warning.code])).toStrictEqual([
+      [3, "invalid_json"],
+      [4, "invalid_json"],
+    ]);
+  });
+
+  it("numbers blank lines at the end of the file", async () => {
+    // A terminating line break is not a line, but every break after the last entry is.
+    await mkdir(dirname(SESSION), { recursive: true });
+    await writeFile(SESSION, `${header()}\n${entry({ id: "last" })}\n\n\n`);
+
+    const result = await firstEntry();
+
+    expect(result.entries.map((row) => row.lineNo)).toStrictEqual([2]);
+    expect(result.warnings.map((warning) => [warning.lineNo, warning.code])).toStrictEqual([
+      [3, "invalid_json"],
+      [4, "invalid_json"],
+    ]);
   });
 
   it("reads a header line longer than the discovery read bound", async () => {

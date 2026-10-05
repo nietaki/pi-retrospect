@@ -6,18 +6,18 @@
  * The whole parsed line is returned as `raw`, which is why an unknown entry type, an unknown
  * message role, or a field added by a newer Pi survives into the result unchanged.
  *
- * The file is read directly and never through Pi's `SessionManager.open()`, which can migrate or
- * append to it. Nothing is written, and nothing is migrated in memory either: `migrateSessionEntries`
- * regenerates version 1 entry ids on every call, which would present an unstable id as a durable
- * reference. A version 1 file therefore returns its entries with `id` and `parentId` null **even when
- * the file stores them** — Pi would replace those bytes on the next open — plus one file-level
- * `legacy_version` warning, and `lineNo` stays the only address that resolves twice. The stored
- * values remain visible in `raw`.
+ * The file is streamed line by line, not read whole, and is never opened through Pi's
+ * `SessionManager.open()`, which can migrate or append to it. Nothing is written, and nothing is
+ * migrated in memory either: `migrateSessionEntries` regenerates version 1 entry ids on every call,
+ * which would present an unstable id as a durable reference. A version 1 file therefore returns its
+ * entries with `id` and `parentId` null **even when the file stores them** — Pi would replace those
+ * bytes on the next open — plus one file-level `legacy_version` warning, and `lineNo` stays the only
+ * address that resolves twice. The stored values remain visible in `raw`.
  *
  * Contract: docs/tool-api.md
  */
 
-import { readFile, realpath } from "node:fs/promises";
+import { open, realpath, type FileHandle } from "node:fs/promises";
 import { isAbsolute, resolve, sep } from "node:path";
 
 import type { JsonObject } from "@earendil-works/pi-ai";
@@ -33,7 +33,7 @@ import type {
 export interface SessionEntriesOptions {
   /** Sessions root, normally `join(getAgentDir(), "sessions")`. Injectable for tests. */
   sessionsRoot: string;
-  /** Checked before opening the file and again while mapping lines. */
+  /** Checked before the file is opened, and again for every line read, so an abort stops the scan. */
   signal?: AbortSignal;
 }
 
@@ -138,13 +138,60 @@ function inspectHeaderLine(line: string): HeaderInfo {
   return { ok: true, version: record.version };
 }
 
-/** The header is line 1; a trailing newline produces no final line. */
-function splitLines(content: string): string[] {
-  const lines = content.split("\n");
+/** A physical line of the file, with the number the caller addresses it by. */
+interface SessionLine {
+  lineNo: number;
+  line: string;
+}
 
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+/** A leading byte-order mark is decoration, not part of line 1's JSON. */
+function stripBom(line: string): string {
+  return line.startsWith("\uFEFF") ? line.slice(1) : line;
+}
 
-  return lines.map((line) => line.replace(/\r$/, ""));
+/**
+ * Stream `path` line by line, numbering every line, and close the handle on the way out.
+ *
+ * The file goes through `FileHandle#readLines` rather than `readFile`, so a long session costs the
+ * entries it yields instead of its size in memory: on a 47 MB / 12k-entry session, peak RSS fell from
+ * ~246 MB to ~148 MB for ~70 ms to ~106 ms. The retained `raw` objects are what remains, which is why
+ * the saving is about two copies of the file rather than the whole of it — and why a session of the
+ * size Pi actually stores (1.5 MB) moves by a few MB and a millisecond or two, not by half.
+ *
+ * Node's readline decides where a line ends, and it counts `\n`, `\r\n`, **and a lone `\r`** as line
+ * breaks. Pi writes `\n` only, so the numbering this yields is the physical `\n` numbering for every
+ * file the tool is meant to read; a hand-edited file with mixed endings can number a line differently
+ * than `wc -l` does, which is the price taken instead of re-implementing the splitting here. A
+ * terminating line break never produces a final empty line, and a blank line does yield, so `lineNo`
+ * stays aligned with the physical line across skipped rows.
+ *
+ * A file with no lines at all yields nothing, which is how an empty file is reported: there is no
+ * line 1 to inspect, and `readSessionEntries` says so after the loop.
+ */
+async function* readSessionLines(path: string, signal?: AbortSignal): AsyncGenerator<SessionLine> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path);
+  } catch (error) {
+    throw new Error(`could not read session file: ${describeError(error)}`);
+  }
+
+  try {
+    let lineNo = 0;
+
+    for await (const raw of handle.readLines({ signal })) {
+      throwIfAborted(signal);
+      lineNo += 1;
+
+      yield { lineNo, line: lineNo === 1 ? stripBom(raw) : raw };
+    }
+  } catch (error) {
+    // A caller that aborts mid-file gets its own reason, not the AbortError Node raises on the stream.
+    throwIfAborted(signal);
+    throw new Error(`could not read session file: ${describeError(error)}`);
+  } finally {
+    await handle.close();
+  }
 }
 
 function messageRoleOf(entry: Record<string, unknown>): string | null {
@@ -231,41 +278,36 @@ export async function readSessionEntries(
 
   const path = await resolveSessionPath(params.sessionPath, options.sessionsRoot);
 
-  let content: string;
-  try {
-    content = await readFile(path, "utf8");
-  } catch (error) {
-    throw new Error(`could not read session file: ${describeError(error)}`);
-  }
-
-  throwIfAborted(options.signal);
-
-  const lines = splitLines(content.replace(/^\uFEFF/, ""));
-  // `splitLines` always yields at least one line — an empty file is one empty line — so line 1
-  // exists to be inspected, and the header check reports an empty file as "first line is empty".
-  const header = inspectHeaderLine(lines[0]);
-
-  if (!header.ok) {
-    throw new Error(`not a Pi session file: ${header.reason}`);
-  }
-
   const warnings: SessionEntriesWarning[] = [];
-  const addressable = header.version >= ADDRESSED_ENTRY_VERSION;
-
-  if (!addressable) {
-    warnings.push({
-      lineNo: null,
-      code: "legacy_version",
-      reason: `session version ${header.version}: entry ids are not durable, so id and parentId are null`,
-    });
-  }
-
   const entries: SessionFileEntry[] = [];
 
-  // Line 1 is the header and never a row, so physical numbering resumes at line 2.
-  for (const [offset, line] of lines.slice(1).entries()) {
-    throwIfAborted(options.signal);
-    const lineNo = offset + 2;
+  // The header line is read with the rest of the file, so the version that gates `addressable` is
+  // only known once line 1 arrives. `headerRead` tells a file with no lines at all from a file whose
+  // header was rejected, because the two throw different errors.
+  let addressable = false;
+  let headerRead = false;
+
+  for await (const { lineNo, line } of readSessionLines(path, options.signal)) {
+    if (lineNo === 1) {
+      const header = inspectHeaderLine(line);
+
+      if (!header.ok) {
+        throw new Error(`not a Pi session file: ${header.reason}`);
+      }
+
+      addressable = header.version >= ADDRESSED_ENTRY_VERSION;
+      headerRead = true;
+
+      if (!addressable) {
+        warnings.push({
+          lineNo: null,
+          code: "legacy_version",
+          reason: `session version ${header.version}: entry ids are not durable, so id and parentId are null`,
+        });
+      }
+
+      continue;
+    }
 
     if (line.trim() === "") {
       warnings.push({ lineNo, code: "invalid_json", reason: "line is blank" });
@@ -292,6 +334,12 @@ export async function readSessionEntries(
     }
 
     entries.push(entry);
+  }
+
+  if (!headerRead) {
+    // The file held no line at all, which is an empty file. A file holding nothing but a line break
+    // still has a blank line 1, and `inspectHeaderLine` refuses that one with the same message.
+    throw new Error("not a Pi session file: first line is empty");
   }
 
   return { entries, warnings };
