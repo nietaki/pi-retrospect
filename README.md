@@ -76,7 +76,7 @@ the tool directly. This is deliberate — the result is structured JSON that a s
 can filter before it costs context — but it does mean the tool is invisible to a
 session running without codemode.
 
-**`session_entries`** takes one parameter, `sessionPath`, and returns every entry of that file:
+**`session_entries`** takes `sessionPath` plus optional filters, and returns the entries of that file:
 `{ lineNo, id, parentId, timestamp, type, messageRole, raw }`, where `raw` is the whole parsed JSON
 line unchanged. Line 1 is the session header and is never returned, so `lineNo` starts at 2 and a
 malformed line costs a warning without shifting the lines after it. Unknown entry types and unknown
@@ -84,30 +84,43 @@ message roles come back verbatim, and the call cannot leave the sessions root �
 `..` traversal, a symlink that resolves outside it, and a file whose first line is not a session
 header all throw.
 
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `startLineNo`, `endLineNo` | unbounded | Inclusive physical line bounds. |
+| `ids`, `parentIds` | unfiltered | Exact, case-sensitive sets of entry ids. A `null` field matches nothing, so a version 1 file is never selected. |
+| `types`, `messageRoles` | unfiltered | Exact, case-sensitive sets. `messageRoles` reaches only `type: "message"` rows. |
+| `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds on each entry's own timestamp, read in the host timezone — the same grammar `list_sessions` uses. |
+| `limit` | none | Cap on returned entries, applied after filtering. |
+
+Filters are ANDed, values inside one array are ORed, and order is never configurable: rows come back
+in file order. Filtering narrows the **result**, never the **scan** — `warnings` still describe the
+whole file. To page, pass `startLineNo` one past the last `lineNo` you already read.
+
 ```js
 // in a codemode script — filter `raw` in the script, never hand it to a model
 const { sessions } = await tools.list_sessions({ sortDirection: "desc", limit: 1 });
-const { entries, warnings } = await tools.session_entries({ sessionPath: sessions[0].path });
+const { entries, warnings } = await tools.session_entries({
+  sessionPath: sessions[0].path,
+  messageRoles: ["assistant"],
+});
 
 if (warnings.length > 0) return { skipped: warnings.length, warnings };
 
-return entries
-  .filter((entry) => entry.messageRole === "assistant")
-  .map((entry) => ({ lineNo: entry.lineNo, stopReason: entry.raw.message.stopReason }));
+return entries.map((entry) => ({ lineNo: entry.lineNo, stopReason: entry.raw.message.stopReason }));
 ```
 
-`raw` is unbounded — as large as the file behind it (a 2.4 MB session returned 2.46 MB of `raw`) —
-so it is a codemode-only tool by design. It reads stored history: no compaction, no `context_edit`,
-no branch selection is applied, so it is not the model's context view. In a session file older than
-version 2, `id` and `parentId` come back `null` even where the line stores them — Pi replaces every
-id when it migrates such a file — and one `legacy_version` warning says so; `lineNo` is the handle
-that stays valid, and `raw` keeps what was written.
+`raw` is unbounded per row — as large as the entries it keeps (a 2.4 MB session returned 2.46 MB of
+`raw`) — so it is a codemode-only tool by design. It reads stored history: no compaction, no
+`context_edit`, no branch selection is applied, so it is not the model's context view. In a session
+file older than version 2, `id` and `parentId` come back `null` even where the line stores them — Pi
+replaces every id when it migrates such a file — and one `legacy_version` warning says so; `lineNo`
+is the handle that stays valid, and `raw` keeps what was written.
 
 ## Reference
 
 - [`docs/tool-api.md`](docs/tool-api.md) — the contract for the operations this
   package exposes: `list_sessions` (discovery rules, filters, ordering, guarantees) and
-  `session_entries` (sessions-root confinement, line addressing, `raw`, warning codes).
+  `session_entries` (sessions-root confinement, line addressing, entry filters, `raw`, warning codes).
 - `test/fixtures/generate.mjs` (source repository, not in the npm tarball) — rebuilds
   the synthetic session tree the tests run against.
 

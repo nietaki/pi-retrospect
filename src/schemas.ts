@@ -198,7 +198,21 @@ export const SessionEntriesWarningSchema = Type.Object(
   { additionalProperties: false, description: "One skipped line, or one whole-file condition" },
 );
 
-/** Parameters for `readSessionEntries`: the single session file to read. */
+/**
+ * A non-empty set of exact values for one field, matched with OR inside the set and AND across
+ * sets. An empty array would select nothing while looking like "no filter", so the schema refuses
+ * it; `minLength: 1` keeps `types: [""]` from being a silent way of asking for a nameless row.
+ */
+const ValueSet = (item: string, description: string) =>
+  Type.Array(Type.String({ minLength: 1, description: item }), { minItems: 1, description });
+
+/**
+ * Parameters for `readSessionEntries`: the single session file to read, plus optional filters.
+ *
+ * Every filter is optional and the result is their AND; values inside one array are ORed. Filters
+ * narrow `entries` only — `warnings` still describe the whole file, because a limited read is still
+ * a full scan. Ordering is not configurable: rows come back in physical file order.
+ */
 export const SessionEntriesParamsSchema = Type.Object(
   {
     sessionPath: Type.String({
@@ -206,6 +220,63 @@ export const SessionEntriesParamsSchema = Type.Object(
       description:
         "Absolute path to a session .jsonl file under the sessions root. A path outside the root, a relative path, a `..` traversal, and a symlink whose target leaves the root all throw.",
     }),
+    startLineNo: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Inclusive lower bound on the physical line number. Line 1 is the session header and is never a row, so 1 and 2 both mean \"from the first entry\". Pagination continues from the last returned lineNo plus one.",
+      }),
+    ),
+    endLineNo: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Inclusive upper bound on the physical line number. A bound that is below startLineNo throws.",
+      }),
+    ),
+    ids: Type.Optional(
+      ValueSet(
+        "Entry id to keep, matched exactly and case-sensitively",
+        "Entry ids to keep. Compared against the returned `id`, so a version 1 file — where every id is null — is never selected.",
+      ),
+    ),
+    parentIds: Type.Optional(
+      ValueSet(
+        "Parent entry id to keep, matched exactly and case-sensitively",
+        "Keep entries whose `parentId` is one of these. A root (null parentId) is never selected, and a version 1 file never is either.",
+      ),
+    ),
+    startTimestamp: Type.Optional(
+      Type.String({
+        description:
+          "Inclusive lower bound on each entry's own timestamp. An ISO 8601 date means the start of that day in the host timezone; an ISO 8601 date-time with no offset is read in the host timezone.",
+      }),
+    ),
+    endTimestamp: Type.Optional(
+      Type.String({
+        description:
+          "Inclusive upper bound on each entry's own timestamp. A bare date covers that whole day; a date-time is an exact instant. A range ending before it starts throws.",
+      }),
+    ),
+    types: Type.Optional(
+      ValueSet(
+        "Entry type to keep, matched exactly and case-sensitively",
+        "Entry types to keep, compared verbatim against `type` — an unknown type from a newer Pi is filterable if it is named exactly.",
+      ),
+    ),
+    messageRoles: Type.Optional(
+      ValueSet(
+        "Message role to keep, matched exactly and case-sensitively",
+        "Roles to keep, compared against `messageRole`. Only a `type: \"message\"` entry carries one, so a non-message row is never selected by any value here.",
+      ),
+    ),
+    limit: Type.Optional(
+      Type.Integer({
+        minimum: 1,
+        description:
+          "Maximum number of entries to return, applied after filtering. An output cap, not an I/O bound: the file is still scanned to the end so warnings stay whole-file.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );

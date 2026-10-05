@@ -47,6 +47,27 @@ export const ListSessionsParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+// `session_entries` repeats the same two shapes for its own rows, through one local helper so the
+// four set filters cannot be written four different ways:
+const ValueSet = (item: string, description: string) =>
+  Type.Array(Type.String({ minLength: 1, description: item }), { minItems: 1, description });
+
+export const SessionEntriesParamsSchema = Type.Object(
+  {
+    sessionPath: Type.String({ minLength: 1 }),
+    startLineNo: Type.Optional(Type.Integer({ minimum: 1 })),
+    endLineNo: Type.Optional(Type.Integer({ minimum: 1 })),
+    ids: Type.Optional(ValueSet(/* … */)),
+    parentIds: Type.Optional(ValueSet(/* … */)),
+    startTimestamp: Type.Optional(Type.String()),
+    endTimestamp: Type.Optional(Type.String()),
+    types: Type.Optional(ValueSet(/* … */)),
+    messageRoles: Type.Optional(ValueSet(/* … */)),
+    limit: Type.Optional(Type.Integer({ minimum: 1 })),
+  },
+  { additionalProperties: false },
+);
+
 export const SessionMetadataSchema = Type.Cyclic(
   {
     SessionMetadata: Type.Object(
@@ -116,6 +137,17 @@ itself (`params.cwdMatch ?? "exact"`, `params.sortBy ?? "timestamp"`,
 `params.sortDirection === "desc"`) because nothing guarantees the schema fills them in.
 `Type.Integer({ minimum: 1 })` is a documentation-and-validation hint, and `buildQuery`
 throws for a bad `limit` as well, so the exported function is safe when called directly.
+`filters.ts` owns that check now, so a bad `limit` means the same thing in both tools; the entry
+bounds and their reversals go through `entry-query.ts` for the same reason. The schema states the
+requirement — positive integers, at least one value per set — and nothing more: how a host validator
+gets a caller there is not this package's contract.
+
+`minItems: 1` on a filter array is the only place an empty set is refused: the schemas reject it, and
+the readers treat `ids: []` or `cwds: []` as selecting nothing rather than throwing, so a direct call
+keeps the same meaning the tool boundary enforces. There is no `offset` on `session_entries` and
+there must not be one added casually — a `startLineNo` test in `session-entries-tool.test.ts` asserts
+its absence, because an offset counts filtered rows while a line bound counts physical ones, and only
+one of the two survives a changed filter.
 
 TypeBox **1.3.27** has no `Type.Nullable` and no `Type.Object` open-shape helper that keeps its
 TypeScript type. Two idioms cover both gaps, and both appear in `src/schemas.ts`:
@@ -166,7 +198,19 @@ Three modules split the work:
 - `src/timestamps.ts` — what a time string means, and the only module that says so. No fs, no
   schema, no error strings: `parseSessionInstant` is the shared parser and validator for headers
   and entries, and `parseTimeBoundary` gates and classifies a filter bound into a day or an
-  instant. `query.ts` turns an `undefined` into a message naming the parameter it rejected.
+  instant.
+
+Two more modules serve the parameters that both tools share, so one caller does not meet two
+dialects of the same word:
+
+- `src/filters.ts` — `timeWindowOf({ startTimestamp, endTimestamp })` builds the window on top of
+  `timestamps.ts`, `withinWindow(window, at)` asks the one comparison question, and
+  `requireLimit(value)` checks the cap. It owns the user-facing messages (`query.ts` used to
+  build them alone) because a bound that reads wrong in one tool must read wrong in the other.
+  It knows nothing about rows.
+- `src/entry-query.ts` — the `session_entries` sibling of `query.ts`. `buildEntryQuery(params)`
+  returns `{ matches, limit }` and throws on a bad parameter. Like `query.ts` it sees only rows
+  the reader already built, so every filter rule is testable through `readSessionEntries`.
 
 `buildQuery` runs before the first `readdir`, which is why a malformed timestamp or a
 reversed range fails on an unreadable root rather than returning `sessions: []` plus a
@@ -195,8 +239,18 @@ instead of prose.
 
 `src/session-entries.ts` exports `readSessionEntries(params, { sessionsRoot, signal })`;
 `src/session-entries-tool.ts` is the factory-wrapped tool, same shape as the listing. Confinement,
-header checks, and line mapping all live in the one module, because there is no query layer to
-separate from the walk.
+header checks, and line mapping live in that one module; the filter and cap parameters live in
+`src/entry-query.ts`, which the reader calls **before** it resolves the path — a nonsense bound is
+the caller's mistake and must outrank both a confinement failure and a missing file.
+
+**Filters narrow the result, never the scan.** The loop builds every row `toEntry` accepts and then
+drops the ones `query.matches` rejects or `query.limit` has already filled, so a filtered row costs
+no warning and a limited read still walks to the last line. That is deliberate: `warnings` is a
+statement about the file, and a read that stopped at `limit` would quietly make it a statement about
+the page. What the drop does save is memory — a discarded row's `raw` is never retained, so the
+result is bounded by the rows it keeps rather than by the file's size, which is the half of the
+`raw` problem this feature answers. The other half (a 2 MB single entry) is not answered: there is
+no per-row budget. See TODOs.
 
 **Confinement** (`resolveSessionPath`) is the only security-relevant rule:
 
@@ -445,10 +499,12 @@ defineTool({
 ```
 
 `src/index.ts` registers both against the same `join(getAgentDir(), "sessions")` root. The
-`session_entries` description must keep stating what a caller cannot infer from one string
-parameter: that the path is confined to the sessions root, that line 1 is the header and is never
+`session_entries` description must keep stating what a caller cannot infer from the parameter
+names alone: that the path is confined to the sessions root, that line 1 is the header and is never
 returned, that `raw` is the whole line and can be megabytes, that entries arrive in file order with
-every branch included, and that version 1 rows come back with null ids.
+every branch included and order is not configurable, that filters are ANDed with OR inside one array
+and match the returned field exactly, that a `null` field matches no array value, that warnings
+describe the whole file whatever the filters say, and that version 1 rows come back with null ids.
 
 The registered `description` must keep telling the caller what it cannot infer from the
 shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
@@ -560,9 +616,14 @@ completes in roughly 200 ms. Running subagent workflows here is still the way to
 parent/child trees for spot-checks — see TODOs.
 
 `session_entries` is covered by `test/session-entries.test.ts` (confinement, header rules, physical
-line numbers, arbitrary `raw`, the three warning codes, v1 nulls, abort) and
-`test/session-entries-tool.test.ts` (registration shape, open `raw` subschema, structured output
-equality, rendered rows, entry point registering both tools), plus a describe block in
+line numbers, arbitrary `raw`, the three warning codes, v1 nulls, abort),
+`test/session-entries-filters.test.ts` (every filter parameter: inclusive line bounds, exact and
+case-sensitive sets, null fields that match nothing, the shared timestamp window, a `limit` that
+does not shorten the scan, AND across categories with OR inside one array, and pagination by
+`startLineNo`), and
+`test/session-entries-tool.test.ts` (registration shape, the filter parameter declarations, open
+`raw` subschema, structured output equality, filters passed through `execute`, rendered rows, entry
+point registering both tools), plus a describe block in
 `test/content.test.ts` for `renderSessionEntriesContent` (row columns, no `raw` leak, the empty
 header, and the `file` versus `line N` warning prefixes). Its fixtures are throwaway files under
 `test/tmp/session-entries*/` written by the tests themselves, not entries in
@@ -600,8 +661,10 @@ break is LF, CRLF, or a lone CR — Node's readline rule, which is `\n` counting
 writes); nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated whenever
 the file cannot supply a citable one — an absent id, and *any* id in a file older than version 2, which
 Pi replaces on migration; every returned row has a real `type` and a validated `timestamp`;
-unknown types, unknown roles, and unknown fields pass through `raw` untouched; and one skipped line
-produces exactly one warning.
+unknown types, unknown roles, and unknown fields pass through `raw` untouched; one skipped line
+produces exactly one warning; and **the filters cannot change either the numbering or the warning
+set** — they select rows from the read the reader already made, so a line bound, a set filter, a
+timestamp window, and a `limit` all read the same file and report the same skips.
 
 ---
 
@@ -612,19 +675,27 @@ produces exactly one warning.
   subagent, so the recursive case is unexercised. Once a nested launch exists, confirm the
   convention — whether a child's own stem directory appears as `…/run-0/<child-stem>/…` —
   and that containment-based grouping does not attach a deep transcript to two parents.
-- **Bound `session_entries` `raw`.** One call returns the whole file: measured 2.46 MB of `raw`
-  from a 2.4 MB session, and `structuredContent` has no size cap, so a script that hands the rows
-  back verbatim can spend more than the context window it is reading. Deferred parameters, not
-  chosen yet: a row range (`startLine` plus `limit`, which composes with the physical `lineNo` the
-  tool already promises) or a byte budget with an offset continuation. The decision that follows: a
-  capped read reported as a warning, as a `complete: false` field, or as nothing at all.
+- **Bound `session_entries` `raw` per row.** The row range and the cap exist now — `startLineNo` /
+  `endLineNo`, the set filters, `limit` — and a dropped row's `raw` is not retained, so a filtered
+  read is bounded by the rows it keeps. What is not bounded is one row: measured 2.46 MB of `raw`
+  from a 2.4 MB session, and a single entry can exceed the context window on its own. Deferred, not
+  chosen: a byte budget with a continuation, or a `raw` that is omitted unless asked for. The
+  decision that follows a cap: a capped read reported as a warning, as a `complete: false` field, or
+  as nothing at all.
+- **Decide whether a bounded read should say so.** `limit` and `endLineNo` silently return a prefix,
+  which is the behavior a caller chose, but nothing in the result distinguishes "the whole file" from
+  "the first 200 rows of it". Whole-file `warnings` is what forces the full scan; a `complete` or
+  `hasMore` flag is the other half of that trade and is not taken yet.
 - **Generate real fixture data.** Run subagent workflows in this project's `cwd` so that
   project's `--<slug>--/` session directory grows actual parent/child trees, then use them
   to check the synthetic layout against reality. Do not commit the output.
-- **Remaining filter parameters.** Time range, `cwd`, ordering, and a row cap exist now.
-  Still deferred: by presence or count of subagents, `includeCurrentSession` (the currently
-  running session is included today; an exclusion parameter is the agreed future direction,
-  most likely `excludePaths`), and a depth limit for `subagentSessions`.
+- **Remaining filter parameters.** Time range, `cwd`, ordering, and a row cap exist now. For
+  `session_entries` the line range, `ids`, `parentIds`, `types`, `messageRoles`, the timestamp
+  window, and `limit` exist now. Still deferred: by presence or count of subagents, `includeCurrentSession`
+  (the currently running session is included today; an exclusion parameter is the agreed future
+  direction, most likely `excludePaths`), and a depth limit for `subagentSessions`. Entry-level
+  searches over `raw` — text, substrings, a field path — are deliberately absent: they would need an
+  index to be worth the scan, and none exists.
 - **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
   (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for
   this project" rather than like a mistake. Two ways out, not chosen yet: reject a
@@ -636,9 +707,11 @@ produces exactly one warning.
   pinned by a test today — `test/list-sessions-filters.test.ts` uses absolute entries, plus
   the non-matching `cwds: ["/repo/never"]` case that keeps `warnings` whole — so whichever way
   this goes, the test comes with it.
-- **Pagination.** `limit` caps rows but does not cursor. If a store ever needs more, a
-  cursor carrying the sort value plus `path` beats an `offset`, which shifts as history
-  grows.
+- **Pagination.** For `session_entries` it is answered: `startLineNo` is a physical bound, so pages
+  are stable against both appends and filters, and `offset` was rejected on purpose (an offset counts
+  matching rows, so a page moves when the filter changes). For `list_sessions`, `limit` caps rows but
+  does not cursor. If a store ever needs more, a cursor carrying the sort value plus `path` beats an
+  `offset`, which shifts as history grows.
 - **Orphaned child trees.** Today they are reported neither as a row nor as a warning. If
   that ever needs to be visible, it should become an explicit warning branch rather than a
   silent rule.

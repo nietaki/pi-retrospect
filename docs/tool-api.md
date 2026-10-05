@@ -292,6 +292,10 @@ adds no warning.
 line number and carrying the parsed line unchanged as `raw`. It is the step after `list_sessions`:
 that operation names transcript files, this one opens one.
 
+Optional parameters filter the rows — a line range, id and parent sets, entry types, message roles,
+a timestamp window, and a cap. They narrow what is **returned**, never what is **read**: the file is
+still scanned to its last line, so `warnings` describe the whole file whatever the parameters say.
+
 It is a **reader of stored history**, not a view of a conversation. It applies no compaction, no
 `context_edit` replacement, and no branch selection, and it never migrates anything — see
 "What this is not" below.
@@ -316,6 +320,76 @@ const { entries, warnings } = await tools.session_entries({ sessionPath });
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `sessionPath` | absolute path string | — | **Required.** A session `.jsonl` file under the sessions root — normally a `path` returned by `list_sessions`, including a nested subagent transcript path. |
+| `startLineNo` | integer ≥ 1 | unbounded | Inclusive lower bound on the physical line number. |
+| `endLineNo` | integer ≥ 1 | unbounded | Inclusive upper bound on the physical line number. |
+| `ids` | non-empty `string[]` | unfiltered | Keep entries whose `id` is one of these. |
+| `parentIds` | non-empty `string[]` | unfiltered | Keep entries whose `parentId` is one of these. |
+| `startTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive lower bound on each entry's own timestamp. |
+| `endTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive upper bound on each entry's own timestamp. |
+| `types` | non-empty `string[]` | unfiltered | Keep entries whose `type` is one of these. |
+| `messageRoles` | non-empty `string[]` | unfiltered | Keep message entries whose role is one of these. |
+| `limit` | integer ≥ 1 | none | Maximum entries returned, applied after filtering. |
+
+### Filters
+
+1. **Categories are ANDed, values inside one array are ORed.**
+   `{ types: ["message", "compaction"], messageRoles: ["user"] }` keeps user messages and no
+   compaction row: the array offers alternatives, the categories stack. A parameter that is absent
+   constrains nothing, and `{}` still means "every entry in the file".
+2. **Matching is exact and case-sensitive**, on the returned field rather than on `raw`. There is no
+   substring, no glob, and no fold: `ids: ["u"]` selects nothing, `types: ["Message"]` selects
+   nothing, and a type this package has never seen is selectable only by naming it exactly.
+3. **A null never matches.** `ids` and `parentIds` read the citable `id` / `parentId`, so a version 1
+   file — where both are `null` even when the line stores values — is never selected, and a root entry
+   is not selected by any `parentIds` value. `messageRoles` reads `messageRole`, which is `null` for
+   every non-message row, so no role string reaches a `model_change` entry even if it is spelled the
+   same way.
+4. **Bounds are inclusive on both ends**, for lines and for timestamps. `startLineNo: 1` and
+   `startLineNo: 2` are the same query: line 1 is the header and can never be a row.
+5. **Timestamps mean what `list_sessions` timestamps mean** — one shared grammar in `filters.ts` and
+   `timestamps.ts`. A bare date names a whole local day, so a date-only `endTimestamp` covers that day
+   to its last millisecond; a date-time with no offset is read in the host timezone. Pi writes entry
+   timestamps as UTC `Z` strings, so the zone can only ever move a bound, never a stored instant.
+   The window compares each entry's own `timestamp`, never the header's.
+6. **`limit` is an output cap, not an I/O bound** — the same rule `list_sessions` states for its own
+   `limit`. Rows past the cap are dropped and their `raw` is not retained, which is what makes a
+   filtered read of a large session affordable; the scan still runs to the end of the file, because a
+   truncated scan would silently truncate `warnings` too.
+7. **A filtered row is not a skipped row.** It costs no warning: `warnings` accounts for lines that
+   could not become entries, and filters account for rows that exist and were not asked for.
+
+**Bad parameters are refused before the file is opened**, so a mistake cannot look like a missing
+session, and they are refused by name. Line bounds and `limit` are positive integers; a filter array
+must hold at least one value; a reversed line range (`endLineNo` below `startLineNo`), a reversed
+timestamp window, and a timestamp the shape gate refuses all throw. Because the check runs before any
+path resolution, a bad filter outranks a confinement failure or a missing file.
+
+**Ordering is not a parameter.** Rows return in physical file order — write order, not time order —
+whatever the filters, so a filtered read is always a contiguous slice of the transcript's own order.
+
+**Pagination is a line bound, not an offset.** `offset` was deliberately left out: it counts matching
+rows, so a page boundary moves whenever the filter changes and it cannot be computed from what a
+previous call returned. A physical bound is stable and self-describing:
+
+```js
+// pages of 200 entries, advancing from the last line number already seen
+let from = 2;
+const pages = [];
+
+for (;;) {
+  const { entries } = await tools.session_entries({ sessionPath, startLineNo: from, limit: 200 });
+  if (entries.length === 0) break;
+  pages.push(entries);
+  from = entries.at(-1).lineNo + 1;
+  if (entries.length < 200) break;
+}
+
+return pages.flat();
+```
+
+The cost of the choice: a page is `limit` rows **from line `startLineNo` onward**, not the rows at
+positions `offset..offset + limit` of the filtered set, so a caller who wants "the 500th matching
+row" must count them itself.
 
 The path is confined to the sessions root, so this operation cannot read an arbitrary `.jsonl`:
 
@@ -343,14 +417,35 @@ is a warning, not an error.
 
 ### Quick examples
 
-The last user prompt of the newest session, without reading the rest:
+The last user prompt of the newest session, without holding the rest of the file:
 
 ```js
 const { sessions } = await tools.list_sessions({ sortDirection: "desc", limit: 1 });
-const { entries } = await tools.session_entries({ sessionPath: sessions[0].path });
+const { entries } = await tools.session_entries({
+  sessionPath: sessions[0].path,
+  messageRoles: ["user"],
+});
 
-const user = entries.filter((e) => e.messageRole === "user").at(-1);
-return user?.raw.message.content;
+return entries.at(-1)?.raw.message.content;
+```
+
+Every tool result that errored, without reading the rows in between:
+
+```js
+const { entries } = await tools.session_entries({ sessionPath, messageRoles: ["toolResult"] });
+
+return entries
+  .filter((e) => e.raw.message.isError)
+  .map((e) => ({ lineNo: e.lineNo, content: e.raw.message.content }));
+```
+
+The head of a huge transcript, cheaply: `limit` drops the rows it cannot keep, so the result holds
+200 entries' worth of `raw` rather than the file's.
+
+```js
+const { entries, warnings } = await tools.session_entries({ sessionPath, limit: 200 });
+
+return { count: entries.length, firstLine: entries[0]?.lineNo, warnings };
 ```
 
 Counting entry types across a session, keeping `raw` inside the script:
@@ -418,9 +513,9 @@ dropped from it.
 
 - **Not the model's context.** No compaction summary replaces older entries, no `context_edit`
   replacement is applied, and the stored leaf and active branch are ignored. `entries` is every line
-  in the file, including abandoned branches and the raw text that an edit later replaced. For
-  "what the model actually saw" you need Pi's `buildContextEntries`/`buildSessionProjection`, which
-  this package does not wrap yet.
+  in the file that the filters let through, including abandoned branches and the raw text that an
+  edit later replaced. For "what the model actually saw" you need Pi's
+  `buildContextEntries`/`buildSessionProjection`, which this package does not wrap yet.
 - **Not chronological.** `entries` is in **file order**, which is write order. A session whose leaf
   was moved backwards interleaves branches, and a resumed subagent run appends. Sort by `timestamp`
   yourself if you want time order — and pick deliberately between entry time and
@@ -431,27 +526,35 @@ dropped from it.
 ### Caller guarantees
 
 1. Line 1 is never returned, and `lineNo` is the **physical** line: a skipped line costs a warning
-   and shifts nothing. A line break is LF, CRLF, or a lone CR — the rule Node's readline applies — and
-   Pi writes LF, so for any file Pi produced this is `\n` counting. Only a hand-edited file with mixed
-   endings numbers differently than `wc -l` would.
+   and shifts nothing, and a filtered line shifts nothing either. A line break is LF, CRLF, or a lone
+   CR — the rule Node's readline applies — and Pi writes LF, so for any file Pi produced this is `\n`
+   counting. Only a hand-edited file with mixed endings numbers differently than `wc -l` would.
 2. Every row has a `type` string and a `timestamp` the session parser can read. `id` and `parentId` are
    `string | null`, and the null is about citability rather than contents: a value appears only when
    the header `version` is at least 2, because Pi replaces every id when it migrates a version 1
    file. What the line actually stored stays visible in `raw`.
 3. `messageRole` is non-null only for `type === "message"`, and is the stored role verbatim —
    including a role this package has never seen.
-4. Each skipped line produces exactly one warning, in line order, so `entries.length` plus skipped
-   lines accounts for the whole file.
-5. Nothing is written. The file is neither migrated nor repaired.
+4. Each skipped line produces exactly one warning, in line order, **whatever the filters are**: a
+   limited or windowed read still reports every line of the file that could not become an entry, and
+   a row excluded by a filter produces none. So `warnings` always accounts for the file, and
+   `entries` accounts only for the rows that were asked for.
+5. Filters never reorder or renumber: `entries` stays a subsequence of the file's own order, and a
+   `lineNo` read from one call means the same line in another call against the same bytes.
+6. Nothing is written. The file is neither migrated nor repaired.
 
 ### Limitations
 
-- **`raw` is unbounded.** The result is as large as the session file: measured 2026-10-02 on one
-  store, the largest session (2.4 MB) returned 356 entries and 2.46 MB of `raw`. Filter and project
-  inside a script; never return `entries` to a model, and never print `raw`.
-- **No range, no filter, no byte budget.** There is no line range, entry-type filter, or limit: the
-  scan takes the whole file. It streams, so the file's bytes are not held at once, but the **result**
-  is held whole — `entries` carrying `raw` is as large as the session, which is the cost that matters.
+- **`raw` is unbounded per row, and only `limit` and the filters bound the whole.** The result is as
+  large as the rows it keeps: measured 2026-10-02 on one store, the largest session (2.4 MB) returned
+  356 entries and 2.46 MB of `raw`, and an unfiltered read still returns all 356. A filtered read
+  retains only the rows it keeps — a dropped row's `raw` is never held — but one row can still be
+  megabytes, because there is no per-row budget. Filter and project inside a script; never return
+  `entries` to a model, and never print `raw`.
+- **Filters do not shorten the scan.** There is a line range, a timestamp window, entry-type and role
+  sets, and a row cap, but the reader still walks every line of the file — it must, to keep
+  `warnings` whole-file. So a `limit: 1` read of a 2.4 MB session costs the same parse as a full one
+  and returns a fraction of the rows. There is no byte budget and no early-exit hint.
 - **`lineNo` is the only durable handle here, and it is durable only while the file is.** Pi appends
   and `createBranchedSession` writes new files, so a line number is a citation into a snapshot, not
   a permanent address. `id` is the stable handle for a v2+ file; in a version 1 file it is `null`

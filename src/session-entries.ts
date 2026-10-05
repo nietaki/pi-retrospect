@@ -1,10 +1,15 @@
 /**
- * Read the entries of one Pi session file, addressed by physical line number.
+ * Read the entries of one Pi session file, addressed by physical line number, narrowed by filters.
  *
  * Line 1 must be a session header and is never returned. Every later line is parsed on its own,
  * so a malformed line costs a warning and does not shift the numbering of the lines after it.
  * The whole parsed line is returned as `raw`, which is why an unknown entry type, an unknown
  * message role, or a field added by a newer Pi survives into the result unchanged.
+ *
+ * The optional filter parameters select rows from that full read (`entry-query.ts`): they bound the
+ * result, never the scan. Every line is still parsed and every skipped line still warns, so
+ * `warnings` describes the file whatever was asked for, and a dropped row costs no warning because
+ * it is a row that exists rather than one that failed.
  *
  * The file is streamed line by line, not read whole, and is never opened through Pi's
  * `SessionManager.open()`, which can migrate or append to it. Nothing is written, and nothing is
@@ -23,6 +28,7 @@ import { isAbsolute, resolve, sep } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 
 import { parseSessionInstant } from "./timestamps.ts";
+import { buildEntryQuery } from "./entry-query.ts";
 import type {
   SessionEntriesOutput,
   SessionEntriesParams,
@@ -259,22 +265,32 @@ function toEntry(
 }
 
 /**
- * Read every entry of one session file under `options.sessionsRoot`.
+ * Read the entries of one session file under `options.sessionsRoot`, narrowed by `params`.
  *
  * `entries` are in physical file order, which is write order rather than timestamp order and keeps
- * every branch of a session tree — abandoned branches included — visible. A line that cannot become
- * an entry is skipped with a warning naming its code, so `warnings` describes exactly what is
- * missing from `entries`.
+ * every branch of a session tree — abandoned branches included — visible. The optional filters are
+ * ANDed (`entry-query.ts`) and applied to rows the reader has already built, so they bound the
+ * **result**, not the scan: `warnings` always cover the whole file, which is why a `limit` or an
+ * `endLineNo` stops rows being collected while the reader still walks every remaining line. A row
+ * dropped by a filter costs no warning — it is a row that exists and was not asked for.
  *
- * Throws when `sessionPath` is not an absolute path inside the sessions root, when the file cannot
- * be read, and when line 1 is not a session header: those mean the caller did not name a readable
- * Pi session, which no amount of returned entries would fix.
+ * A line that cannot become an entry is skipped with a warning naming its code, so `warnings`
+ * describes exactly which lines are missing from `entries` apart from the ones filtered out.
+ *
+ * Throws when a filter parameter is unusable (before the file is opened, so a bad bound cannot look
+ * like a missing session), when `sessionPath` is not an absolute path inside the sessions root, when
+ * the file cannot be read, and when line 1 is not a session header: those mean the caller did not
+ * name a readable Pi session, which no amount of returned entries would fix.
  */
 export async function readSessionEntries(
   params: SessionEntriesParams,
   options: SessionEntriesOptions,
 ): Promise<SessionEntriesOutput> {
   throwIfAborted(options.signal);
+
+  // Before any path work: a nonsense filter is the caller's mistake, and it must outrank both a
+  // confinement failure and a missing file.
+  const query = buildEntryQuery(params);
 
   const path = await resolveSessionPath(params.sessionPath, options.sessionsRoot);
 
@@ -332,6 +348,13 @@ export async function readSessionEntries(
       warnings.push({ lineNo, code: "invalid_entry", reason: entry.reason });
       continue;
     }
+
+    // A filtered row is parsed and then dropped: filters decide what is returned, not what is
+    // read, because the scan owes its warnings to the whole file — the same "output cap, not an
+    // I/O bound" rule `list_sessions.limit` already follows. Dropping the row here is what keeps
+    // its `raw` from being retained: the result is bounded even when the file is not.
+    if (query.limit !== undefined && entries.length >= query.limit) continue;
+    if (!query.matches(entry)) continue;
 
     entries.push(entry);
   }

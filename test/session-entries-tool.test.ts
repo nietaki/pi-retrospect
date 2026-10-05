@@ -1,7 +1,7 @@
 /**
  * Covers the registered shape of the `session_entries` tool (codemode-only, read-only, one
- * required `sessionPath` parameter), that its structured result equals `readSessionEntries`,
- * and that the extension entry point registers both tools.
+ * required `sessionPath` parameter beside the optional filters), that its structured result equals
+ * `readSessionEntries`, and that the extension entry point registers both tools.
  *
  * `execute`'s fifth argument is typed as Pi's full tool context and `registerTool` as part of
  * `ExtensionAPI`; neither is read here, so the fakes carry just the members used.
@@ -84,9 +84,48 @@ describe("session_entries tool registration", () => {
     expect(tool.exposure).toBe("codemode");
     expect(tool.annotations).toStrictEqual({ readOnlyHint: true });
 
-    expect(Object.keys(tool.parameters.properties)).toStrictEqual(["sessionPath"]);
+    expect(Object.keys(tool.parameters.properties)).toStrictEqual([
+      "sessionPath",
+      "startLineNo",
+      "endLineNo",
+      "ids",
+      "parentIds",
+      "startTimestamp",
+      "endTimestamp",
+      "types",
+      "messageRoles",
+      "limit",
+    ]);
     expect(tool.parameters.required).toStrictEqual(["sessionPath"]);
     expect(tool.parameters.additionalProperties).toBe(false);
+  });
+
+  it("declares every filter as an optional property, with array filters holding exact strings", () => {
+    const { properties } = tool.parameters;
+
+    for (const name of ["ids", "parentIds", "types", "messageRoles"] as const) {
+      const array = properties[name] as {
+        type: string;
+        minItems: number;
+        items: { type: string; minLength: number };
+      };
+      expect(array.type, name).toBe("array");
+      expect(array.minItems, `${name} must reject an empty set`).toBe(1);
+      expect(array.items.type, name).toBe("string");
+      expect(array.items.minLength, `${name} entries are exact, not partial`).toBe(1);
+    }
+
+    for (const name of ["startLineNo", "endLineNo", "limit"] as const) {
+      const integer = properties[name] as { type: string; minimum: number };
+      expect(integer.type, name).toBe("integer");
+      expect(integer.minimum, `${name} is a positive integer`).toBe(1);
+    }
+
+    // No `offset`: pagination is a physical `startLineNo`, so a page boundary cannot shift when a
+    // filter excludes rows.
+    expect(properties).not.toHaveProperty("offset");
+    expect(properties).not.toHaveProperty("sortBy");
+    expect(properties).not.toHaveProperty("sortDirection");
   });
 
   it("keeps raw an open object so any entry shape passes validation", () => {
@@ -97,11 +136,14 @@ describe("session_entries tool registration", () => {
     expect(entrySchema.additionalProperties).toBe(true);
   });
 
-  it("describes confinement, the discarded header, and the v1 rule", () => {
+  it("describes confinement, the discarded header, the v1 rule, and the filters", () => {
     expect(tool.description).toContain("sessions root");
     expect(tool.description).toContain("session header");
     expect(tool.description).toContain("version 1");
     expect(tool.description).toMatch(/read-only/i);
+    expect(tool.description).toContain("ANDed");
+    expect(tool.description).toContain("startLineNo");
+    expect(tool.description).toContain("warnings describe the whole file");
   });
 });
 
@@ -124,6 +166,30 @@ describe("session_entries tool execution", () => {
     expect(structured(result).entries[0]?.messageRole).toBe("user");
     expect(structured(result).entries[1]?.messageRole).toBeNull();
     expect(structured(result).warnings).toStrictEqual([]);
+  });
+
+  it("passes the filters through to the reader", async () => {
+    const params = { sessionPath: SESSION, types: ["message"], limit: 1 };
+    const expected = await readSessionEntries(params, { sessionsRoot: ROOT });
+    const result = await tool.execute("call-5", params, undefined, undefined, NO_CONTEXT);
+
+    expect(result.structuredContent).toStrictEqual(expected);
+    expect(
+      structured(result).entries.map((row) => row.lineNo),
+      "the fixture holds one message row and one model_change row",
+    ).toStrictEqual([2]);
+
+    // A bound that excludes the only matching row is an empty result, not an error.
+    const outside = await tool.execute(
+      "call-6",
+      { sessionPath: SESSION, types: ["message"], startLineNo: 3 },
+      undefined,
+      undefined,
+      NO_CONTEXT,
+    );
+
+    expect(structured(outside).entries).toStrictEqual([]);
+    expect(firstTextBlock(outside)).toMatch(/^Entries \(0\)/m);
   });
 
   it("renders an index of entries without raw payloads", async () => {

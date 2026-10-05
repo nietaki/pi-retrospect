@@ -3,23 +3,18 @@
  *
  * Kept separate from the filesystem walk: this module only ever sees already-validated
  * session rows, so every rule here is testable through `listSessions` without touching disk.
+ * The timestamp window and the `limit` check are shared with `session_entries` through
+ * `filters.ts`.
  *
  * Contract: docs/tool-api.md
  */
 
 import { basename, dirname } from "node:path";
 
-import { parseSessionInstant, parseTimeBoundary } from "./timestamps.ts";
-import type { TimeBoundary } from "./timestamps.ts";
+import { parseSessionInstant } from "./timestamps.ts";
+import { requireLimit, timeWindowOf, withinWindow } from "./filters.ts";
+import type { TimeWindow } from "./filters.ts";
 import type { CwdMatch, ListSessionsParams, SessionMetadata, SessionSortField } from "./schemas.ts";
-
-/**
- * Half-open session-time window in epoch milliseconds.
- *
- * Both ends are `null` when unbounded. `toInclusive` distinguishes an end date-time (an exact
- * instant, kept) from an end date (the following local midnight, never kept).
- */
-type TimeWindow = { fromMs: number | null; toMs: number | null; toInclusive: boolean };
 
 /** A prepared query: what to keep, how to order what remains, and how many to return. */
 export type SessionQuery = {
@@ -27,57 +22,6 @@ export type SessionQuery = {
   compareRoots: (a: SessionMetadata, b: SessionMetadata) => number;
   limit: number | undefined;
 };
-
-/**
- * Resolve one timestamp parameter to a bound, or say which parameter was unusable.
- *
- * The grammar is `timestamps.ts`'s business; this layer only names the parameter so the message
- * tells the caller which field it got wrong, and the error text itself stays a `list_sessions`
- * contract rather than leaking into the shared module.
- */
-function parseBoundary(value: string, name: string): TimeBoundary {
-  const bound = parseTimeBoundary(value);
-
-  if (bound === undefined) {
-    throw new Error(
-      `${name} must be an ISO 8601 date, or an ISO 8601 date-time (one with no timezone is read in the host timezone): ${value}`,
-    );
-  }
-
-  return bound;
-}
-
-function timeWindowOf(params: ListSessionsParams): TimeWindow {
-  let fromMs: number | null = null;
-  let toMs: number | null = null;
-  let toInclusive = true;
-
-  if (params.startTimestamp !== undefined) {
-    const bound = parseBoundary(params.startTimestamp, "startTimestamp");
-
-    // A date-only start means that day, so its lower end is the day's local midnight.
-    fromMs = bound.kind === "day" ? bound.startMs : bound.ms;
-  }
-
-  if (params.endTimestamp !== undefined) {
-    const bound = parseBoundary(params.endTimestamp, "endTimestamp");
-
-    // A date-only end means the whole of that local day, so its upper end is the next local
-    // midnight and is never kept. It is not `23:59:59.999`, which would drop a session in the last
-    // millisecond, and not `+ MS_PER_DAY`, which would stop an hour short of a 25-hour
-    // daylight-saving day.
-    toMs = bound.kind === "day" ? bound.endMs : bound.ms;
-    toInclusive = bound.kind === "instant";
-  }
-
-  if (fromMs !== null && toMs !== null && toMs < fromMs) {
-    throw new Error(
-      `endTimestamp ${params.endTimestamp} resolves before startTimestamp ${params.startTimestamp}`,
-    );
-  }
-
-  return { fromMs, toMs, toInclusive };
-}
 
 /**
  * Absolute path without a trailing separator, so `/repo/app` and `/repo/app/` compare equal.
@@ -164,11 +108,7 @@ function matchesRootOf(params: ListSessionsParams, window: TimeWindow): (session
       return false;
     }
 
-    const at = instantOf(session);
-    if (window.fromMs !== null && at < window.fromMs) return false;
-    if (window.toMs !== null && (window.toInclusive ? at > window.toMs : at >= window.toMs)) return false;
-
-    return true;
+    return withinWindow(window, instantOf(session));
   };
 }
 
@@ -181,14 +121,10 @@ function matchesRootOf(params: ListSessionsParams, window: TimeWindow): (session
 export function buildQuery(params: ListSessionsParams): SessionQuery {
   const window = timeWindowOf(params);
 
-  if (params.limit !== undefined && (!Number.isInteger(params.limit) || params.limit < 1)) {
-    throw new Error(`limit must be a positive integer: ${String(params.limit)}`);
-  }
-
   return {
     matchesRoot: matchesRootOf(params, window),
     compareRoots: comparatorOf(params),
-    limit: params.limit,
+    limit: requireLimit(params.limit),
   };
 }
 

@@ -29,7 +29,7 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: ["**/node_modules/**"],
       // Vitest 5 defaults the text reporter to skipFull, which hides every fully covered
-      // module from the console. Show all seven src modules, blind spots or not.
+      // module from the console. Show every src module, blind spots or not.
       reporter: [["text", { skipFull: false }], "html", "lcov"],
       reportsDirectory: "coverage",
     },
