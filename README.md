@@ -98,7 +98,10 @@ return entries
 
 `raw` is unbounded — as large as the file behind it (a 2.4 MB session returned 2.46 MB of `raw`) —
 so it is a codemode-only tool by design. It reads stored history: no compaction, no `context_edit`,
-no branch selection is applied, so it is not the model's context view.
+no branch selection is applied, so it is not the model's context view. In a session file older than
+version 2, `id` and `parentId` come back `null` even where the line stores them — Pi replaces every
+id when it migrates such a file — and one `legacy_version` warning says so; `lineNo` is the handle
+that stays valid, and `raw` keeps what was written.
 
 ## Reference
 

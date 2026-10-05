@@ -395,9 +395,36 @@ describe("readSessionEntries version handling", () => {
       {
         lineNo: null,
         code: "legacy_version",
-        reason: "session version 1: id and parentId are absent in the file",
+        reason: "session version 1: entry ids are not durable, so id and parentId are null",
       },
     ]);
+  });
+
+  it("nulls the ids a version 1 file already carries, and keeps them in raw", async () => {
+    // Pi's `migrateV1ToV2` assigns `entry.id = generateId(ids)` unconditionally, so a stored v1 id
+    // is replaced the next time Pi opens the file. Returning it would hand out a citation that
+    // resolves to nothing, even though the file does contain one.
+    await writeSession([entry({ id: "persisted", parentId: "older", message: undefined })]);
+    const content = await readFile(SESSION, "utf8");
+    await writeFile(SESSION, content.replace('"version":3', '"version":1'));
+
+    const result = await firstEntry();
+
+    expect(result.entries.map((row) => [row.lineNo, row.id, row.parentId])).toStrictEqual([
+      [2, null, null],
+    ]);
+    expect(result.entries[0]?.raw).toMatchObject({ id: "persisted", parentId: "older" });
+    expect(result.warnings.map((warning) => warning.code)).toStrictEqual(["legacy_version"]);
+  });
+
+  it("keeps ids in a version 2 file that are absent from a version 1 one", async () => {
+    await writeSession([entry({ id: "kept", parentId: "root" })]);
+    const content = await readFile(SESSION, "utf8");
+    await writeFile(SESSION, content.replace('"version":3', '"version":2'));
+
+    const result = await firstEntry();
+
+    expect(result.entries.map((row) => [row.id, row.parentId])).toStrictEqual([["kept", "root"]]);
   });
 
   it("treats a header with no version field as v1", async () => {
@@ -509,5 +536,15 @@ describe("readSessionEntries warnings", () => {
     await expect(
       readSessionEntries({ sessionPath: SESSION }, { sessionsRoot: ROOT, signal: controller.signal }),
     ).rejects.toThrow();
+  });
+
+  it("re-throws a non-Error abort reason as an Error", async () => {
+    await writeSession([entry()]);
+    const controller = new AbortController();
+    controller.abort("stopped by caller");
+
+    await expect(
+      readSessionEntries({ sessionPath: SESSION }, { sessionsRoot: ROOT, signal: controller.signal }),
+    ).rejects.toThrow(/aborted/);
   });
 });

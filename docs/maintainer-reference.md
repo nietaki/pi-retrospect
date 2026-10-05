@@ -208,6 +208,10 @@ separate from the walk.
    is computed on resolved targets, so a link planted inside the root and aimed at `/etc/passwd`
    resolves outside and throws. `within` treats the root itself as outside — a directory is not a
    session file.
+5. The **resolved** path is what `readFile` opens, so replacing `sessionPath` with a different symlink
+   after step 3 cannot redirect this read. A target swapped after resolution is not defended (no
+   `O_NOFOLLOW`), which is the residual window; it only matters against a concurrent writer inside the
+   operator's own sessions root, which is not the threat this confinement exists for.
 
 **Header check** (`inspectHeaderLine`) is deliberately weaker than `validateHeaderLine` in
 `src/session-metadata.ts`, which the listing uses. The listing returns `id`, `cwd`, and `timestamp`,
@@ -228,22 +232,25 @@ starts at index 1 and reports `index + 1` as `lineNo`.
 | --- | --- |
 | `type` | must be a non-empty string and not `"session"`, else `invalid_entry` — a row nobody can name, or a header that has drifted off line 1 |
 | `timestamp` | must be a string passing `isRealTimestamp`, else `invalid_entry` — a row nobody can place in time |
-| `id` | non-empty string, else `null`. Never rejects a line |
-| `parentId` | non-empty string, else `null` (a root, an absent field, or a non-string all read as null) |
+| `id` | non-empty string **and** a header `version` of at least 2, else `null`. Never rejects a line |
+| `parentId` | same rule as `id`: non-empty string in a v2+ file, else `null` (a root, an absent field, or a non-string all read as null) |
 | `messageRole` | the `message.role` string when `type === "message"`, else `null` |
 | `raw` | the parsed line, cast to `JsonObject` — safe by construction, it came from `JSON.parse` |
 
-`id` and `parentId` are absent rather than wrong, so they cannot be acceptance criteria: version 1
-files, extension-written entries, and a partially migrated file all legitimately lack them and are
-still readable. `isRealTimestamp` is shared with the listing precisely so `2026-02-30` does not roll
+`id` and `parentId` cannot be acceptance criteria — a missing one is a null, not a rejected row — and
+in a version 1 file neither is citable, so `addressable` (header `version >= 2`) gates both. An
+extension-written or partially migrated entry that lacks them in a v2+ file also simply reads as null.
+`isRealTimestamp` is shared with the listing precisely so `2026-02-30` does not roll
 over into March and reach the output as a timestamp.
 
 **Version 1 is reported, never migrated.** `migrateSessionEntries` mints fresh random ids on every
 call (`generateId` is collision-checked within one pass only), so a migrated id would look like a
-durable citation and resolve to nothing on the next read. The reader therefore returns the file as
-stored — `id: null`, `parentId: null` — plus one `legacy_version` warning with `lineNo: null`, and
-leaves `lineNo` as the only handle. `SessionManager.open()` is never used for the same reason it is
-never used in the listing: it rewrites.
+durable citation and resolve to nothing on the next read. The reader therefore reports `id: null` and
+`parentId: null` for every version 1 row **even when the line stores them** — `migrateV1ToV2` assigns
+`entry.id = generateId(ids)` unconditionally, so Pi replaces a stored v1 id the next time it opens the
+file — plus one `legacy_version` warning with `lineNo: null`. `raw` keeps what was actually written,
+so nothing is hidden; the null is about citability, not about the bytes. `SessionManager.open()` is
+never used for the same reason it is never used in the listing: it rewrites.
 
 **Abort** is checked before resolving the path and again per line, so a huge file can be abandoned
 mid-map rather than only before or after it.
@@ -451,7 +458,7 @@ Entries (2)
 - 3 model_change
 
 Warnings (2)
-- file legacy_version: session version 1: id and parentId are absent in the file
+- file legacy_version: session version 1: entry ids are not durable, so id and parentId are null
 - line 7 invalid_json: line is not valid JSON: Unexpected end of JSON input
 ```
 
@@ -526,11 +533,13 @@ Live-store spot-checks live in `scratch/` (not the suite, not the tarball, and n
 `node --experimental-strip-types scratch/entries-smoke.mts` reads one real session and rejects
 `/etc/hosts`; `scratch/entries-size.mts` reports what the largest sessions return;
 `scratch/entries-store.mts` reads every parent session; `scratch/entries-artifacts.mts` walks every
-`.jsonl` under the root recursively. Measured 2026-10-02: of 212 `.jsonl` files under the root, 203
-(parents and child transcripts) read with **0 warnings** across 15,744+ entries in ~310 ms, and the
-remaining 9 — the `subagent-artifacts/*_transcript.jsonl` dumps — were all refused by the header
-check with no other error class appearing. `raw` came back within a hair of the file size (2.46 MB
-from a 2.4 MB session), which is the number behind the unbounded-`raw` limitation.
+`.jsonl` under the root recursively. Measured 2026-10-02: of 215 `.jsonl` files under the root, 204
+read with **0 warnings** and the other 11 — every `subagent-artifacts/*_transcript.jsonl` dump in the
+store, counted independently — refused by the header check with no other error class appearing. Every
+parent session read together: 145 files, 15,928 entries, 0 warnings, ~250 ms. `raw` came back within a
+hair of the file size (2.46 MB from a 2.4 MB session), which is the number behind the unbounded-`raw`
+limitation. These are live-store counts and drift while the operator works: the same walk measured
+212 files an hour earlier. Re-measure rather than trusting the totals.
 
 ### Implementation guarantees
 
@@ -547,8 +556,9 @@ discovered session are considered.
 For `session_entries`: `sessionPath` is confined to the sessions root by `realpath` containment on
 both sides, so no spelling or symlink route reaches a file outside it; line 1 is validated as a
 session header and never returned; `lineNo` is the physical line and survives skipped lines;
-nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated when
-the file does not carry them; every returned row has a real `type` and a validated `timestamp`;
+nothing is migrated, repaired, or written; `id` and `parentId` are null rather than fabricated whenever
+the file cannot supply a citable one — an absent id, and *any* id in a file older than version 2, which
+Pi replaces on migration; every returned row has a real `type` and a validated `timestamp`;
 unknown types, unknown roles, and unknown fields pass through `raw` untouched; and one skipped line
 produces exactly one warning.
 

@@ -326,6 +326,11 @@ The path is confined to the sessions root, so this operation cannot read an arbi
 5. A later line carrying `type: "session"` is **not** an entry: it is skipped with `invalid_entry`,
    because line 1 is the only place a header belongs.
 
+Confinement is decided when the path is resolved, and the **resolved** path is what gets opened — so
+swapping the symlink afterwards does not redirect the read to somewhere else. What is not defended is
+a swap of the resolved target itself between resolution and opening (no `O_NOFOLLOW` open is used),
+which only matters if another process is rewriting the sessions root while this call runs.
+
 Anything else about the file — a blank line, a truncated line, an entry from an unknown future Pi —
 is a warning, not an error.
 
@@ -396,7 +401,7 @@ type SessionEntriesWarning = {
 | --- | --- | --- |
 | `invalid_json` | the line is blank, or does not parse | line skipped |
 | `invalid_entry` | the line parsed but is not an object, has no `type`, is a second header row, or has no real `timestamp` | line skipped |
-| `legacy_version` | the header `version` is absent or below 2 | nothing skipped; rows arrive with `id` and `parentId` `null`, because a version 1 file does not carry them |
+| `legacy_version` | the header `version` is absent or below 2 | nothing skipped; every row's `id` and `parentId` are `null`, because a version 1 id does not survive a Pi migration — even an id the file stores |
 
 `raw` is the parsed line exactly as stored — Pi's fields, plus anything a newer Pi or an extension
 wrote, including fields this package has never seen. Nothing is decoded, re-encoded, reordered, or
@@ -421,7 +426,9 @@ dropped from it.
 1. Line 1 is never returned, and `lineNo` is the **physical** line: a skipped line costs a warning
    and shifts nothing.
 2. Every row has a `type` string and a validated ISO 8601 `timestamp`. `id` and `parentId` are
-   `string | null` and say what the file holds, not what Pi currently writes.
+   `string | null`, and the null is about citability rather than contents: a value appears only when
+   the header `version` is at least 2, because Pi replaces every id when it migrates a version 1
+   file. What the line actually stored stays visible in `raw`.
 3. `messageRole` is non-null only for `type === "message"`, and is the stored role verbatim —
    including a role this package has never seen.
 4. Each skipped line produces exactly one warning, in line order, so `entries.length` plus skipped
@@ -437,9 +444,10 @@ dropped from it.
   is a single `readFile`, so a huge session costs its full size in one call.
 - **`lineNo` is the only durable handle here, and it is durable only while the file is.** Pi appends
   and `createBranchedSession` writes new files, so a line number is a citation into a snapshot, not
-  a permanent address. `id` is the stable handle for a v2+ file; in a v1 file it is `null` and a
-  freshly generated one would not survive to the next read — which is why this tool returns `null`
-  instead of minting an id.
+  a permanent address. `id` is the stable handle for a v2+ file; in a version 1 file it is `null`
+  even when the line stores one, because `migrateV1ToV2` assigns `entry.id = generateId(ids)`
+  unconditionally — so the stored value would be replaced the next time Pi opens the file, and this
+  tool returns `null` rather than minting or preserving an id it cannot stand behind.
 - **Header fields are checked only as far as this operation needs.** `list_sessions` requires a
   non-empty `id` and `cwd` because it returns them; here a file whose header lacks them still reads,
   because its entries are readable.

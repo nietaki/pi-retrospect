@@ -9,8 +9,10 @@
  * The file is read directly and never through Pi's `SessionManager.open()`, which can migrate or
  * append to it. Nothing is written, and nothing is migrated in memory either: `migrateSessionEntries`
  * regenerates version 1 entry ids on every call, which would present an unstable id as a durable
- * reference. A version 1 file therefore returns its entries with `id` and `parentId` null, plus one
- * file-level `legacy_version` warning, and `lineNo` stays the only address that resolves twice.
+ * reference. A version 1 file therefore returns its entries with `id` and `parentId` null **even when
+ * the file stores them** — Pi would replace those bytes on the next open — plus one file-level
+ * `legacy_version` warning, and `lineNo` stays the only address that resolves twice. The stored
+ * values remain visible in `raw`.
  *
  * Contract: docs/tool-api.md
  */
@@ -159,11 +161,21 @@ function messageRoleOf(entry: Record<string, unknown>): string | null {
 /**
  * Map one parsed line to a row, or say why it is not an entry.
  *
- * `id` and `parentId` are absent rather than wrong, so they never reject a line: version 1 files
- * and extension-written entries simply arrive as null. `type` and `timestamp` are required, because
- * a row without them cannot be described or ordered.
+ * `addressable` is whether the file's own `id`/`parentId` can be trusted as a handle. It comes from
+ * the header version, not from the line: `migrateV1ToV2` assigns `entry.id = generateId(ids)`
+ * unconditionally, so a version 1 file replaces **every** id — including one it already stores — the
+ * next time Pi opens it. A version 1 line therefore reports null ids even when `raw` shows values,
+ * because the field promises a re-resolvable citation and those bytes do not survive a migration.
+ * Absent ids in a v2+ file are also simply null rather than a rejected line: they cannot be fixed by
+ * inventing one, and the row is still readable and addressable by `lineNo`.
+ *
+ * `type` and `timestamp` are required, because a row without them cannot be described or ordered.
  */
-function toEntry(lineNo: number, parsed: unknown): SessionFileEntry | { reason: string } {
+function toEntry(
+  lineNo: number,
+  parsed: unknown,
+  addressable: boolean,
+): SessionFileEntry | { reason: string } {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return { reason: "line is not a JSON object" };
   }
@@ -188,8 +200,9 @@ function toEntry(lineNo: number, parsed: unknown): SessionFileEntry | { reason: 
 
   return {
     lineNo,
-    id: typeof fields.id === "string" && fields.id !== "" ? fields.id : null,
-    parentId: typeof fields.parentId === "string" && fields.parentId !== "" ? fields.parentId : null,
+    id: addressable && typeof fields.id === "string" && fields.id !== "" ? fields.id : null,
+    parentId:
+      addressable && typeof fields.parentId === "string" && fields.parentId !== "" ? fields.parentId : null,
     timestamp: fields.timestamp,
     type: fields.type,
     messageRole: messageRoleOf(fields),
@@ -228,32 +241,34 @@ export async function readSessionEntries(
   throwIfAborted(options.signal);
 
   const lines = splitLines(content.replace(/^\uFEFF/, ""));
-  const header: HeaderInfo =
-    lines.length > 0 ? inspectHeaderLine(lines[0]!) : { ok: false, reason: "file is empty" };
+  // `splitLines` always yields at least one line — an empty file is one empty line — so line 1
+  // exists to be inspected, and the header check reports an empty file as "first line is empty".
+  const header = inspectHeaderLine(lines[0]);
 
   if (!header.ok) {
     throw new Error(`not a Pi session file: ${header.reason}`);
   }
 
   const warnings: SessionEntriesWarning[] = [];
+  const addressable = header.version >= ADDRESSED_ENTRY_VERSION;
 
-  if (header.version < ADDRESSED_ENTRY_VERSION) {
+  if (!addressable) {
     warnings.push({
       lineNo: null,
       code: "legacy_version",
-      reason: `session version ${header.version}: id and parentId are absent in the file`,
+      reason: `session version ${header.version}: entry ids are not durable, so id and parentId are null`,
     });
   }
 
   const entries: SessionFileEntry[] = [];
 
-  for (let index = 1; index < lines.length; index++) {
+  // Line 1 is the header and never a row, so physical numbering resumes at line 2.
+  for (const [offset, line] of lines.slice(1).entries()) {
     throwIfAborted(options.signal);
-
-    const line = lines[index]!;
+    const lineNo = offset + 2;
 
     if (line.trim() === "") {
-      warnings.push({ lineNo: index + 1, code: "invalid_json", reason: "line is blank" });
+      warnings.push({ lineNo, code: "invalid_json", reason: "line is blank" });
       continue;
     }
 
@@ -262,17 +277,17 @@ export async function readSessionEntries(
       parsed = JSON.parse(line);
     } catch (error) {
       warnings.push({
-        lineNo: index + 1,
+        lineNo,
         code: "invalid_json",
         reason: `line is not valid JSON: ${describeError(error)}`,
       });
       continue;
     }
 
-    const entry = toEntry(index + 1, parsed);
+    const entry = toEntry(lineNo, parsed, addressable);
 
     if ("reason" in entry) {
-      warnings.push({ lineNo: index + 1, code: "invalid_entry", reason: entry.reason });
+      warnings.push({ lineNo, code: "invalid_entry", reason: entry.reason });
       continue;
     }
 

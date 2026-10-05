@@ -152,8 +152,9 @@ export const JsonObjectSchema = Type.Unsafe<JsonObject>({
 /**
  * One session entry with the metadata needed to cite it.
  *
- * `lineNo` is the durable handle. Pi writes `id` and `parentId` from session version 2 on, so
- * both are `null` in a version 1 file, where they would otherwise be regenerated per read.
+ * `lineNo` is the durable handle. `id` and `parentId` describe what a caller may cite, not what the
+ * bytes say: Pi writes them from session version 2 on, and `migrateV1ToV2` overwrites every id in a
+ * version 1 file — stored ones included — so a version 1 row reports `null` and `raw` keeps the text.
  */
 export const SessionFileEntrySchema = Type.Object(
   {
@@ -161,7 +162,7 @@ export const SessionFileEntrySchema = Type.Object(
       minimum: 2,
       description: "Physical 1-based line number; line 1 is the header and is never returned",
     }),
-    id: NullableString("Entry id, or null when the file carries none"),
+    id: NullableString("Entry id, or null when the file carries none or carries one that a version 1 migration would replace"),
     parentId: NullableString("Entry parentId; null for a root, an absent value, or a non-string"),
     timestamp: Type.String({
       format: "date-time",
@@ -189,7 +190,7 @@ export const SessionEntriesWarningSchema = Type.Object(
       [Type.Literal("invalid_json"), Type.Literal("invalid_entry"), Type.Literal("legacy_version")],
       {
         description:
-          '"invalid_json": the line is blank or does not parse. "invalid_entry": it parsed but has no usable type or timestamp. "legacy_version": the session predates version 2, so entry ids are absent.',
+          '"invalid_json": the line is blank or does not parse. "invalid_entry": it parsed but has no usable type or timestamp. "legacy_version": the session predates version 2, so entry ids are not durable and are returned null even when the line stores them.',
       },
     ),
     reason: Type.String({ description: "Human-readable detail; not an enum" }),

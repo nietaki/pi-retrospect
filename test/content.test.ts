@@ -151,7 +151,7 @@ describe("renderSessionEntriesContent", () => {
     const text = renderSessionEntriesContent({
       entries: [],
       warnings: [
-        { lineNo: null, code: "legacy_version", reason: "session version 1: ids absent" },
+        { lineNo: null, code: "legacy_version", reason: "session version 1: entry ids are not durable" },
         { lineNo: 7, code: "invalid_json", reason: "line is not valid JSON" },
       ],
     });
@@ -161,7 +161,7 @@ describe("renderSessionEntriesContent", () => {
         "Entries (0)",
         "",
         "Warnings (2)",
-        "- file legacy_version: session version 1: ids absent",
+        "- file legacy_version: session version 1: entry ids are not durable",
         "- line 7 invalid_json: line is not valid JSON",
       ].join("\n"),
     );
