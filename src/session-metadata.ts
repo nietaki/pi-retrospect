@@ -9,46 +9,10 @@
 
 import { open } from "node:fs/promises";
 
+import { parseSessionInstant } from "./timestamps.ts";
+
 /** Maximum accepted length, in bytes, of a session header line. */
 export const MAX_HEADER_LINE_BYTES = 4096;
-
-/** RFC 3339 / ISO 8601 date-time, the shape Pi writes in session headers. */
-const ISO_8601_TIMESTAMP =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
-
-const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-function isLeapYear(year: number): boolean {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-}
-
-/**
- * Calendar check that `Date.parse` does not provide.
- *
- * `Date.parse("2026-02-30T08:00:00.000Z")` rolls over to March 2 instead of failing, so an
- * impossible date would otherwise pass validation and reach the output as an untrustworthy
- * timestamp string. Also used to vet timestamp filter parameters (`list-sessions.ts`), where
- * the same rollover would silently widen or narrow a range.
- */
-export function isRealTimestamp(timestamp: string): boolean {
-  const parts = ISO_8601_TIMESTAMP.exec(timestamp);
-  if (!parts) return false;
-
-  const year = Number(parts[1]);
-  const month = Number(parts[2]);
-  const day = Number(parts[3]);
-  const hour = Number(parts[4]);
-  const minute = Number(parts[5]);
-  const second = Number(parts[6]);
-
-  if (month < 1 || month > 12) return false;
-
-  const daysInMonth = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
-  if (day < 1 || day > daysInMonth) return false;
-
-  // Second 60 is allowed for a positive leap second; hour and minute are strict.
-  return hour <= 23 && minute <= 59 && second <= 60;
-}
 
 export type HeaderFailure = { ok: false; reason: string };
 
@@ -155,8 +119,8 @@ export function validateHeaderLine(line: string): HeaderResult {
     return { ok: false, reason: "session header has no cwd" };
   }
 
-  if (typeof record.timestamp !== "string" || !isRealTimestamp(record.timestamp)) {
-    return { ok: false, reason: "session header has no valid ISO 8601 timestamp" };
+  if (typeof record.timestamp !== "string" || parseSessionInstant(record.timestamp) === undefined) {
+    return { ok: false, reason: "session header has no readable timestamp" };
   }
 
   if ("parentSession" in record && typeof record.parentSession !== "string") {

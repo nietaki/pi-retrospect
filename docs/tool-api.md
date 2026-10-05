@@ -55,18 +55,21 @@ Four rules decide most of what callers ask:
 1. **Filters act on top-level sessions only.** A parent that matches arrives with its
    complete `subagentSessions` tree — children are never filtered, counted against `limit`,
    or re-ordered. A delegated run whose own `cwd` differs from its parent still comes along.
-2. **Dates are UTC calendar days**, because Pi writes header timestamps with
-   `new Date().toISOString()`: measured on this machine's store, 196 of 196 timestamps end
-   in `Z`. `startTimestamp: "2026-09-01"` is `2026-09-01T00:00:00.000Z`. A **date-only
-   `endTimestamp` covers that whole day**: `"2026-09-30"` keeps every session up to
-   `2026-09-30T23:59:59.999Z` and drops `2026-10-01T00:00:00.000Z`. Internally that is the
-   exclusive start of the next day, not a `23:59:59.999` cut, so no session is lost to
-   sub-millisecond precision.
-3. **A date-time boundary must carry a timezone** (`Z` or `±HH:MM`). A naive date-time would
-   otherwise be read in the machine's local zone, so the same filter string could select
-   different sessions on two machines; it throws instead. With an offset, the comparison is
-   the instant, so `"2026-02-01T13:30:00+01:00"` and `"2026-02-01T12:30:00Z"` are the same
-   bound. Both date-time bounds are inclusive.
+2. **Dates are calendar days in the host timezone**, and a date-time carrying no offset is read
+   there too: `startTimestamp: "2026-09-01"` is local midnight on 2026-09-01. A **date-only
+   `endTimestamp` covers that whole day** — the bound is the next local midnight and is never
+   kept, so nothing is lost to a `23:59:59.999` cut. A day is measured as two local midnights
+   rather than 86 400 000 milliseconds, so a 23- or 25-hour daylight-saving day is spanned
+   correctly. Pi writes header timestamps with `new Date().toISOString()`: measured on this
+   machine's store, 196 of 196 timestamps end in `Z`, so the zone can only ever move a *bound*,
+   never a stored instant.
+3. **A naive bound is portable by coincidence.** A date-time carrying `Z` or `±HH:MM` is one
+   instant everywhere, so `"2026-02-01T13:30:00+01:00"` and `"2026-02-01T12:30:00Z"` are the same
+   bound. One with no offset is read in the host zone, so the same filter string can select
+   different sessions on two machines — write `Z` when the range matters. Bounds are shape-gated
+   to ISO 8601 by `src/timestamps.ts`, so `1/2/2026`, `Jan 2 2026`, and `12345` throw instead of
+   resolving to a date nobody meant; `2026-02-30` has the shape and no date, and the parser rolls
+   it to March 2, which is the bound you get. Both date-time bounds are inclusive.
 4. **`limit` is an output cap, not an I/O bound.** Headers are still read for every session
    before the top N are picked, so a small `limit` shortens the result, not the scan.
 
@@ -79,10 +82,12 @@ else**: no git metadata is read, so `/repos/app-backup` — an ordinary director
 to be named that way — matches, and a worktree created with `git worktree add` somewhere
 else does not. Callers who need certainty about worktrees still have to check the directory.
 
-Errors are thrown, not returned as empty results: an unparseable or impossible calendar date
-(`"2026-02-30"`), a naive date-time, a range whose end resolves before its start, and a
-`limit` below 1 all fail before any file is opened. A call that merely matches nothing
-returns `sessions: []`.
+Errors are thrown, not returned as empty results: a bound that is not ISO 8601 shaped
+(`"1/2/2026"`, `"12345"`, `"yesterday"`), one whose shape is right and has no instant behind it
+(`"2026-13-01"`), a range whose end resolves before its start, and a `limit` below 1 all fail before
+any file is opened. A shape-right, calendar-wrong date such as `"2026-02-30"` does not throw: the
+parser rolls it to March 2 and that is the bound you get. A call that merely matches nothing returns
+`sessions: []`.
 
 ### Quick examples
 
@@ -123,7 +128,8 @@ const { sessions } = await tools.list_sessions({
 return sessions.map((session) => ({ path: session.path, cwd: session.cwd }));
 ```
 
-One calendar month, date-only bounds:
+One calendar month, date-only bounds — each bound is that day in the host timezone, so on a
+machine west of UTC the first hours of September 1 belong to the August 31 day:
 
 ```js
 const { sessions } = await tools.list_sessions({
@@ -178,7 +184,7 @@ type ListSessionsOutput = {
 | --- | --- |
 | `id` | Session id from the file header. Not a safe key — see Limitations. |
 | `path` | Absolute path to the session `.jsonl` file. **The handle to key on**: unique among returned rows, and what you hand to a file-reading tool. |
-| `timestamp` | Valid ISO 8601 header timestamp; always parseable, so it is safe to sort and compare. |
+| `timestamp` | Header timestamp as stored, accepted only once the session parser can read it; safe to sort and compare, and not necessarily strict ISO 8601. |
 | `cwd` | Absolute working directory of the session. Empty `cwd` never appears: such files are skipped. |
 | `parentSessionPath` | Optional. Fork/clone lineage copied verbatim from the header. **Not** the nesting relationship. |
 | `subagentSessions` | Transcripts launched under this session, nested recursively. Always present; `[]` when there are none. |
@@ -242,8 +248,8 @@ adds no warning.
 
 ### Caller guarantees
 
-1. Every row has `id`, absolute `path`, absolute non-empty `cwd`, and a parseable ISO 8601
-   `timestamp`. There are no partial rows and no `Invalid Date`.
+1. Every row has `id`, absolute `path`, absolute non-empty `cwd`, and a `timestamp` the session
+   parser (`src/timestamps.ts`) can read. There are no partial rows and no `Invalid Date`.
 2. `subagentSessions` is always present; `[]` for a session with no children.
 3. Ordering is total and reproducible: the top level follows `sortBy`/`sortDirection` with
    timestamp and `path` tie-breaks, children are always timestamp ascending, ties by `path`.
@@ -384,7 +390,7 @@ type SessionFileEntry = {
   lineNo: number;              // physical line, >= 2; the handle that always resolves
   id: string | null;           // entry id, or null when the file carries none
   parentId: string | null;     // null for a root, an absent value, or a non-string
-  timestamp: string;           // entry timestamp, ISO 8601, validated
+  timestamp: string;           // entry timestamp, as stored, once the session parser can read it
   type: string;                // verbatim — an unknown type is preserved, not rejected
   messageRole: string | null;  // role of a "message" entry, else null
   raw: object;                 // the whole parsed line, unchanged
@@ -425,7 +431,7 @@ dropped from it.
 
 1. Line 1 is never returned, and `lineNo` is the **physical** line: a skipped line costs a warning
    and shifts nothing.
-2. Every row has a `type` string and a validated ISO 8601 `timestamp`. `id` and `parentId` are
+2. Every row has a `type` string and a `timestamp` the session parser can read. `id` and `parentId` are
    `string | null`, and the null is about citability rather than contents: a value appears only when
    the header `version` is at least 2, because Pi replaces every id when it migrates a version 1
    file. What the line actually stored stays visible in `raw`.

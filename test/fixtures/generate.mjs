@@ -99,9 +99,12 @@ const SESSIONS = [
     line: header({ id: uuid(8), timestamp: "2026-01-07T08:00:00.000Z", cwd: "" }) },
   { path: "--fixture-alpha--/bad-timestamp.jsonl",
     line: header({ id: uuid(9), timestamp: "yesterday", cwd: "/repo/alpha" }) },
-  // Matches the ISO shape but is not a real date, so Date.parse rejects it.
+  // Impossible, not malformed: the shape is a clean ISO 8601 date-time, and there is no instant
+  // for it, because the parser refuses second 60. `2026-02-30T08:00:00.000Z` would not serve as a
+  // fixture for this branch — `Date.parse` rolls that over to March 2, and the session-entry path
+  // accepts any rollover it can read (see `src/timestamps.ts`).
   { path: "--fixture-alpha--/bad-impossible-timestamp.jsonl",
-    line: header({ id: uuid(10), timestamp: "2026-02-30T08:00:00.000Z", cwd: "/repo/alpha" }) },
+    line: header({ id: uuid(10), timestamp: "2026-01-05T09:00:60Z", cwd: "/repo/alpha" }) },
   { path: "--fixture-alpha--/bad-parent-session.jsonl",
     line: header({ id: uuid(11), timestamp: "2026-01-07T09:00:00.000Z", cwd: "/repo/alpha", parentSession: 42 }) },
 

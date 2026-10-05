@@ -55,7 +55,7 @@ export const SessionMetadataSchema = Type.Cyclic(
         path: Type.String({ description: "Absolute path to the session .jsonl file" }),
         timestamp: Type.String({
           format: "date-time",
-          description: "Header timestamp, ISO 8601, validated before the row is returned",
+          description: "Header timestamp as stored; a row is returned only when the session parser can read it",
         }),
         cwd: Type.String({ description: "Absolute working directory from the header" }),
         parentSessionPath: Type.Optional(
@@ -106,11 +106,11 @@ Recursive schemas use `Type.Cyclic` + `Type.Ref`; this TypeBox release has no
 `assertValidSessionId` only constrains the character set, so a custom id is valid Pi
 data and must not be rejected here.
 
-`format: "date-time"` is a real guarantee rather than documentation, because timestamps are
-validated before a row is returned (see Validation rules).
+`format: "date-time"` is a real guarantee rather than documentation, because a row is returned only
+when `src/timestamps.ts` can read its timestamp (see Validation rules).
 
 Filter parameters are `Type.String()`, **not** `format: "date"`/`"date-time"`: this TypeBox
-release does not enforce formats, so both shapes are checked in `src/query.ts` instead.
+release does not enforce formats, so both shapes are gated in `src/timestamps.ts` instead.
 `default` annotations on the enums document behavior; the code still applies the defaults
 itself (`params.cwdMatch ?? "exact"`, `params.sortBy ?? "timestamp"`,
 `params.sortDirection === "desc"`) because nothing guarantees the schema fills them in.
@@ -155,7 +155,7 @@ export async function listSessions(
 ): Promise<ListSessionsOutput>;
 ```
 
-Two modules split the work:
+Three modules split the work:
 
 - `src/list-sessions.ts` — discovery. Walks the root, reads and validates headers, nests
   transcripts, sorts warnings. Knows nothing about filtering, ordering, or limiting.
@@ -163,6 +163,10 @@ Two modules split the work:
   limit }` and throws on bad parameters; `applyQuery(roots, query)` filters, sorts, and
   slices the **top level only**. It receives already-validated rows, so every parameter rule
   is testable through `listSessions` without touching disk.
+- `src/timestamps.ts` — what a time string means, and the only module that says so. No fs, no
+  schema, no error strings: `parseSessionInstant` is the shared parser and validator for headers
+  and entries, and `parseTimeBoundary` gates and classifies a filter bound into a day or an
+  instant. `query.ts` turns an `undefined` into a message naming the parameter it rejected.
 
 `buildQuery` runs before the first `readdir`, which is why a malformed timestamp or a
 reversed range fails on an unreadable root rather than returning `sessions: []` plus a
@@ -231,7 +235,7 @@ starts at index 1 and reports `index + 1` as `lineNo`.
 | Field | Rule |
 | --- | --- |
 | `type` | must be a non-empty string and not `"session"`, else `invalid_entry` — a row nobody can name, or a header that has drifted off line 1 |
-| `timestamp` | must be a string passing `isRealTimestamp`, else `invalid_entry` — a row nobody can place in time |
+| `timestamp` | must be a string `parseSessionInstant` can read, else `invalid_entry` — a row nobody can place in time |
 | `id` | non-empty string **and** a header `version` of at least 2, else `null`. Never rejects a line |
 | `parentId` | same rule as `id`: non-empty string in a v2+ file, else `null` (a root, an absent field, or a non-string all read as null) |
 | `messageRole` | the `message.role` string when `type === "message"`, else `null` |
@@ -240,8 +244,11 @@ starts at index 1 and reports `index + 1` as `lineNo`.
 `id` and `parentId` cannot be acceptance criteria — a missing one is a null, not a rejected row — and
 in a version 1 file neither is citable, so `addressable` (header `version >= 2`) gates both. An
 extension-written or partially migrated entry that lacks them in a v2+ file also simply reads as null.
-`isRealTimestamp` is shared with the listing precisely so `2026-02-30` does not roll
-over into March and reach the output as a timestamp.
+`parseSessionInstant` is both the acceptance check and the instant the sorters compare, shared by
+the header check in `session-metadata.ts` and the entry check in `session-entries.ts`, so an
+accepted string can never produce a `NaN` comparison. It reads `2026-02-30` as March 2 and lets that
+timestamp reach the output, on purpose: refusing a rollover would mean keeping a second grammar
+beside the one that orders the rows, and the two would drift.
 
 **Version 1 is reported, never migrated.** `migrateSessionEntries` mints fresh random ids on every
 call (`generateId` is collision-checked within one pass only), so a migrated id would look like a
@@ -318,9 +325,11 @@ resolution, normalization, or existence check. A `parentSession` present but not
 is a skip-plus-warning; an empty-string `parentSession` is treated as absent and omitted
 from the row. `path` is absolute because `sessionsRoot` is resolved with `path.resolve()`
 before the walk and every row path is built from it; `cwd` is absolute because we require
-it. Timestamp validation includes a calendar check `Date.parse` does not provide —
-`"2026-02-30T08:00:00.000Z"` rolls over instead of failing, and would otherwise reach the
-output as an untrustworthy string.
+it. Timestamp acceptance is `parseSessionInstant` in `src/timestamps.ts`, which is the same call the
+sorters use, so an accepted timestamp cannot compare as `NaN`. It does not check the calendar:
+`"2026-02-30T08:00:00.000Z"` rolls over to March 2 and reaches the output as the string the file
+stored. That is the deliberate cost of one grammar — the check and the parser used to disagree about
+`":60"`, `"+99:99"`, and `24:00`.
 
 ### Ordering rules
 
@@ -345,24 +354,31 @@ both because the sessions root is resolved with `path.resolve()` before the walk
 - **Scope.** `matchesRoot` is applied to top-level rows only, so a kept parent always
   arrives with its full tree. This is the alternative to pruning children, which would make
   "sessions in this range" unspeakable whenever a child's own `cwd` or timestamp differs.
-- **Dates are UTC**, matching `new Date().toISOString()` in Pi's `session-manager.js` (196
-  of 196 timestamps on this machine's store end in `Z`). A date-only start is
-  `Date.UTC(y, m-1, d)`; a date-only end is that plus 86 400 000 ms, compared with `>=`, so
-  the day is included whole. `23:59:59.999` was rejected as a cut because a header carrying
-  more precision would silently vanish.
-- **Date-times need an offset.** `ISO_DATE_TIME_WITH_OFFSET` gates the value before
-  `Date.parse`, so a naive `"2026-02-01T12:30:00"` throws instead of resolving in the local
-  zone. Values that do carry `Z` or `±HH:MM` are compared as instants, and the existing
-  `isRealTimestamp` calendar check (exported from `session-metadata.ts`) rejects impossible
-  dates that `Date.parse` would roll over.
+- **Dates are calendar days in the host timezone.** A date-only bound becomes the two local
+  midnights around it — `new Date(y, m-1, d)` and `new Date(y, m-1, d+1)` — and the day is then
+  compared with `startMs <= at && at < endMs`, so the day is included whole. `23:59:59.999` was
+  rejected as a cut because a header carrying more precision would silently vanish, and adding
+  86 400 000 ms to the start was rejected because a daylight-saving day is 23 or 25 hours long and
+  the window would stop short of the date the caller named. Pi writes header timestamps with
+  `new Date().toISOString()` (196 of 196 timestamps on this machine's store end in `Z`), so the
+  zone can move a bound but never a stored instant.
+- **Date-times are gated by shape, not by calendar.** `ISO_BOUND` in `src/timestamps.ts` admits an
+  ISO 8601 date, optionally with a time, optional seconds and fraction, and an optional offset, so
+  `1/2/2026`, `Jan 2 2026`, and `12345` throw instead of resolving to dates nobody meant. A naive
+  `"2026-02-01T12:30:00"` is then read in the local zone, which is the operator's chosen trade: a
+  caller in a timezone asking about its own afternoon, accepted at the price of a bound that is not
+  portable between machines. Values carrying `Z` or `±HH:MM` are one instant everywhere. Nothing
+  checks the calendar any more — `2026-02-30` rolls over, and `2026-13-01` has no instant for
+  `Date.parse` to find and so still throws.
 - **`sibling-prefix` is lexical.** Trailing separators are stripped (`/repo/app` equals
   `/repo/app/`), then a candidate matches if it equals the requested path or shares its
   `dirname()` and has a basename starting with `<requested-basename>-`. No `git` call, no
   `realpath`, no case folding: path comparisons stay exactly as headers recorded them.
 - **`limit` caps output, not work.** Headers are all read first; there is no index.
-- **Errors are throws.** Unparseable bounds, impossible dates, naive date-times, a range
-  ending before it starts, and `limit < 1` each throw, which the tool layer turns into a
-  failed tool result. Matching nothing is not an error.
+- **Errors are throws.** A bound that fails the ISO shape gate, one with no instant behind it,
+  a range ending before it starts, and `limit < 1` each throw, which the tool layer turns into a
+  failed tool result. A rollover (`"2026-02-30"`) and a naive date-time do not throw — they mean
+  March 2 and the host zone. Matching nothing is not an error.
 
 ### Missing or empty root
 
@@ -413,7 +429,7 @@ every branch included, and that version 1 rows come back with null ids.
 The registered `description` must keep telling the caller what it cannot infer from the
 shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
 filters and ordering act on top-level sessions while children arrive whole and in launch
-order, that a date-only `endTimestamp` means the whole UTC day, that `sibling-prefix` is a
+order, that a date-only `endTimestamp` means the whole day in the host timezone, that `sibling-prefix` is a
 path heuristic rather than git detection, that nesting is expressed by `subagentSessions`
 while `parentSessionPath` is fork lineage, and that an empty list plus warnings means
 unreadable rather than absent history. It currently does not say that `path` is the handle

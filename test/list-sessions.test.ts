@@ -167,12 +167,12 @@ describe("listSessions warnings", () => {
       ["bad-wrong-type.jsonl", /not a session header \(type: message\)/],
       ["bad-missing-id.jsonl", /no id/],
       ["bad-empty-cwd.jsonl", /no cwd/],
-      ["bad-timestamp.jsonl", /ISO 8601/],
-      ["bad-impossible-timestamp.jsonl", /ISO 8601/],
+      ["bad-timestamp.jsonl", /readable timestamp/],
+      ["bad-impossible-timestamp.jsonl", /readable timestamp/],
       ["bad-parent-session.jsonl", /parentSession is not a string/],
       ["00000000-0000-4000-8000-000000000006.jsonl", /longer than 4096 bytes/],
       // A broken child transcript: warned by its full path, absent from its parent's list.
-      ["launch-dddd/run-0/session.jsonl", /ISO 8601/],
+      ["launch-dddd/run-0/session.jsonl", /readable timestamp/],
     ];
 
     for (const [suffix, expected] of expectedReasons) {

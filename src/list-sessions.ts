@@ -11,7 +11,7 @@
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { applyQuery, buildQuery } from "./query.ts";
+import { applyQuery, buildQuery, instantOf } from "./query.ts";
 import { readSessionHeader } from "./session-metadata.ts";
 import type {
   ListSessionsOutput,
@@ -63,8 +63,8 @@ function containsPath(container: string, path: string): boolean {
 
 /** Timestamp ascending, oldest first; ties broken by path so the order is total. */
 function compareSessions(a: SessionMetadata, b: SessionMetadata): number {
-  const left = Date.parse(a.timestamp);
-  const right = Date.parse(b.timestamp);
+  const left = instantOf(a);
+  const right = instantOf(b);
 
   // Paths are unique among rows, so a path tie-break never has to answer "equal".
   if (left !== right) return left - right;

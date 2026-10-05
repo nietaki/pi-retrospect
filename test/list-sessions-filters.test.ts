@@ -13,6 +13,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { listSessions } from "../src/list-sessions.ts";
+import { instantOf } from "../src/query.ts";
 import type { SessionMetadata } from "../src/schemas.ts";
 
 const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
@@ -73,6 +74,23 @@ async function makeStore(name: string, rows: StoreRow[]): Promise<string> {
 /** `00000000-0000-4000-8000-0000000000NN` -> NN, so expectations read as short labels. */
 const tag = (id: string): string => id.slice(-4);
 const tags = (sessions: SessionMetadata[]): string[] => sessions.map((session) => tag(session.id));
+
+/**
+ * Run `body` with the host timezone forced to `zone`, then put the variable back.
+ *
+ * `body` is awaited inside the `try`: the timestamp grammar reads the zone every time it parses, and
+ * for `listSessions` some of that work happens after its first `await`.
+ */
+async function withZone<T>(zone: string, body: () => Promise<T>): Promise<T> {
+  const previous = process.env.TZ;
+  process.env.TZ = zone;
+  try {
+    return await body();
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+}
 
 function flatten(sessions: SessionMetadata[], found: SessionMetadata[] = []): SessionMetadata[] {
   for (const session of sessions) {
@@ -162,7 +180,10 @@ describe("cwds and cwdMatch", () => {
 });
 
 describe("timestamp ranges", () => {
-  it("startTimestamp as a date keeps sessions from the start of that UTC day", async () => {
+  it("startTimestamp as a date keeps sessions from the start of that local day", async () => {
+    // The day is the host's, and vitest.config.ts pins the host to UTC, so the grid's UTC midnights
+    // are the edges asserted here. "reads a naive bound in the host timezone" below shows what
+    // another zone does to the same call.
     const root = await makeStore("date-start", DAYS);
 
     const output = await listSessions({ startTimestamp: "2026-02-01" }, { sessionsRoot: root });
@@ -170,7 +191,7 @@ describe("timestamp ranges", () => {
     expect(tags(output.sessions)).toStrictEqual(["0112", "0113", "0114", "0115"]);
   });
 
-  it("endTimestamp as a date keeps the whole UTC day but not the next one", async () => {
+  it("endTimestamp as a date keeps the whole local day but not the next one", async () => {
     const root = await makeStore("date-end", DAYS);
 
     const output = await listSessions({ endTimestamp: "2026-02-05" }, { sessionsRoot: root });
@@ -194,12 +215,30 @@ describe("timestamp ranges", () => {
     expect(tags(output.sessions)).toStrictEqual(["0111", "0112", "0113"]);
   });
 
-  it("a boundary date-time without a timezone is rejected instead of read as local time", async () => {
+  it("a boundary date-time with no timezone is read in the host timezone", async () => {
     const root = await makeStore("datetime-naive", DAYS);
 
-    await expect(
-      listSessions({ startTimestamp: "2026-02-01T12:30:00" }, { sessionsRoot: root }),
-    ).rejects.toThrow(/startTimestamp.*timezone/i);
+    const naive = await listSessions({ startTimestamp: "2026-02-01T00:30:00" }, { sessionsRoot: root });
+    const explicit = await listSessions({ startTimestamp: "2026-02-01T00:30:00Z" }, { sessionsRoot: root });
+
+    // Pinned to UTC, so a naive bound and the same bound written with `Z` are one instant, and the
+    // session at 00:00Z is outside a range that starts at 00:30.
+    expect(tags(naive.sessions)).toStrictEqual(["0113", "0114", "0115"]);
+    expect(naive).toStrictEqual(explicit);
+
+    // Away from the pin the same string is a different instant, and the January session comes back
+    // inside the range. That is the documented cost of accepting a naive bound, not a defect.
+    const tokyo = await withZone("Asia/Tokyo", () =>
+      listSessions({ startTimestamp: "2026-02-01T00:30:00" }, { sessionsRoot: root }),
+    );
+
+    expect(tags(tokyo.sessions), "00:30 in Tokyo is 2026-01-31T15:30Z").toStrictEqual([
+      "0111",
+      "0112",
+      "0113",
+      "0114",
+      "0115",
+    ]);
   });
 
   it("a nonsense timestamp parameter is rejected, not treated as an empty range", async () => {
@@ -211,13 +250,22 @@ describe("timestamp ranges", () => {
     await expect(listSessions({ endTimestamp: "next week" }, { sessionsRoot: root })).rejects.toThrow(/endTimestamp/);
   });
 
-  it("an impossible calendar date is rejected rather than rolled over", async () => {
+  it("an impossible calendar date rolls over instead of being refused", async () => {
     const root = await makeStore("impossible-date", DAYS);
 
-    await expect(listSessions({ startTimestamp: "2026-02-30" }, { sessionsRoot: root })).rejects.toThrow(
-      /startTimestamp/,
+    // 2026-02-30 is not a date. One grammar owns this now, and it reads the string as March 2, so
+    // the bound is kept: the range it describes is the range 2026-03-02 describes.
+    const rolled = await listSessions({ endTimestamp: "2026-02-30" }, { sessionsRoot: root });
+    const landed = await listSessions({ endTimestamp: "2026-03-02" }, { sessionsRoot: root });
+
+    expect(tags(rolled.sessions)).toStrictEqual(["0111", "0112", "0113", "0114", "0115"]);
+    expect(rolled).toStrictEqual(landed);
+
+    // A month number with no instant behind it is still refused: the shape gate passes it and
+    // `Date.parse` has nothing to return.
+    await expect(listSessions({ endTimestamp: "2026-13-01" }, { sessionsRoot: root })).rejects.toThrow(
+      /endTimestamp/,
     );
-    await expect(listSessions({ endTimestamp: "2026-13-01" }, { sessionsRoot: root })).rejects.toThrow(/endTimestamp/);
   });
 
   it("a reversed range is rejected, and bad parameters never reach the filesystem", async () => {
@@ -349,5 +397,25 @@ describe("filters and the whole-scan warnings", () => {
 
     expect(tags(output.sessions)).toStrictEqual(["0141"]);
     expect(tags(output.sessions[0].subagentSessions)).toStrictEqual(["0142"]);
+  });
+});
+
+describe("instantOf", () => {
+  it("never hands a comparator a NaN, even for a row no scan could produce", () => {
+    // A row reaches a sort only through `validateHeaderLine`, which accepts a timestamp exactly when
+    // it names an instant, so the fallback below is unreachable in production. It is exercised here
+    // because what it guarantees — a total ordering with no `Invalid Date`, which `docs/tool-api.md`
+    // promises a caller — is otherwise only visible as an absence. A hand-built row is the only way
+    // to see the guarantee hold rather than merely not be violated.
+    const row = (timestamp: string): SessionMetadata => ({
+      id: "00000000-0000-4000-8000-000000000001",
+      path: "/repo/alpha/0001.jsonl",
+      cwd: "/repo/alpha",
+      timestamp,
+      subagentSessions: [],
+    });
+
+    expect(instantOf(row("2026-01-05T09:00:00.000Z"))).toBe(Date.parse("2026-01-05T09:00:00.000Z"));
+    expect(Number.isFinite(instantOf(row("no such date")))).toBe(true);
   });
 });

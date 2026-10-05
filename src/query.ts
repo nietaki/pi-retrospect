@@ -9,23 +9,15 @@
 
 import { basename, dirname } from "node:path";
 
-import { isRealTimestamp } from "./session-metadata.ts";
+import { parseSessionInstant, parseTimeBoundary } from "./timestamps.ts";
+import type { TimeBoundary } from "./timestamps.ts";
 import type { CwdMatch, ListSessionsParams, SessionMetadata, SessionSortField } from "./schemas.ts";
-
-const MS_PER_DAY = 86_400_000;
-
-/** ISO 8601 calendar date with no time part. */
-const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-/** ISO 8601 date-time carrying `Z` or a numeric offset, so it denotes one instant. */
-const ISO_DATE_TIME_WITH_OFFSET =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Half-open session-time window in epoch milliseconds.
  *
  * Both ends are `null` when unbounded. `toInclusive` distinguishes an end date-time (an exact
- * instant, kept) from an end date (the following UTC midnight, never kept).
+ * instant, kept) from an end date (the following local midnight, never kept).
  */
 type TimeWindow = { fromMs: number | null; toMs: number | null; toInclusive: boolean };
 
@@ -37,50 +29,22 @@ export type SessionQuery = {
 };
 
 /**
- * Start of a UTC calendar day, or `undefined` when the string is not a real date.
+ * Resolve one timestamp parameter to a bound, or say which parameter was unusable.
  *
- * The round trip rejects impossible dates: `Date.UTC` rolls `2026-02-30` over to March and
- * the components then disagree.
+ * The grammar is `timestamps.ts`'s business; this layer only names the parameter so the message
+ * tells the caller which field it got wrong, and the error text itself stays a `list_sessions`
+ * contract rather than leaking into the shared module.
  */
-function utcDayStartMs(date: string): number | undefined {
-  const parts = ISO_DATE.exec(date);
-  if (!parts) return undefined;
+function parseBoundary(value: string, name: string): TimeBoundary {
+  const bound = parseTimeBoundary(value);
 
-  const year = Number(parts[1]);
-  const month = Number(parts[2]);
-  const day = Number(parts[3]);
-
-  const ms = Date.UTC(year, month - 1, day);
-  const probe = new Date(ms);
-
-  if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) {
-    return undefined;
-  }
-
-  return ms;
-}
-
-/**
- * Resolve one timestamp parameter to epoch milliseconds.
- *
- * A naive date-time is refused rather than read in the machine's local zone: the same filter
- * string must select the same sessions on every machine. An impossible calendar date is
- * refused for the same reason `Date.parse` is not trusted — it rolls over instead of failing.
- */
-function parseBoundary(value: string, name: string): number {
-  if (ISO_DATE.test(value)) {
-    const ms = utcDayStartMs(value);
-    if (ms === undefined) throw new Error(`${name} is not a real ISO 8601 date: ${value}`);
-    return ms;
-  }
-
-  if (!ISO_DATE_TIME_WITH_OFFSET.test(value) || !isRealTimestamp(value)) {
+  if (bound === undefined) {
     throw new Error(
-      `${name} must be an ISO 8601 date, or a date-time with an explicit timezone (Z or +HH:MM): ${value}`,
+      `${name} must be an ISO 8601 date, or an ISO 8601 date-time (one with no timezone is read in the host timezone): ${value}`,
     );
   }
 
-  return Date.parse(value);
+  return bound;
 }
 
 function timeWindowOf(params: ListSessionsParams): TimeWindow {
@@ -89,21 +53,21 @@ function timeWindowOf(params: ListSessionsParams): TimeWindow {
   let toInclusive = true;
 
   if (params.startTimestamp !== undefined) {
-    fromMs = parseBoundary(params.startTimestamp, "startTimestamp");
+    const bound = parseBoundary(params.startTimestamp, "startTimestamp");
+
+    // A date-only start means that day, so its lower end is the day's local midnight.
+    fromMs = bound.kind === "day" ? bound.startMs : bound.ms;
   }
 
   if (params.endTimestamp !== undefined) {
-    const value = params.endTimestamp;
+    const bound = parseBoundary(params.endTimestamp, "endTimestamp");
 
-    if (ISO_DATE.test(value)) {
-      // A date-only end means "the whole of that day", so it becomes the next midnight
-      // exclusively rather than 23:59:59.999, which would drop a session in the last
-      // millisecond.
-      toMs = parseBoundary(value, "endTimestamp") + MS_PER_DAY;
-      toInclusive = false;
-    } else {
-      toMs = parseBoundary(value, "endTimestamp");
-    }
+    // A date-only end means the whole of that local day, so its upper end is the next local
+    // midnight and is never kept. It is not `23:59:59.999`, which would drop a session in the last
+    // millisecond, and not `+ MS_PER_DAY`, which would stop an hour short of a 25-hour
+    // daylight-saving day.
+    toMs = bound.kind === "day" ? bound.endMs : bound.ms;
+    toInclusive = bound.kind === "instant";
   }
 
   if (fromMs !== null && toMs !== null && toMs < fromMs) {
@@ -149,10 +113,23 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : 1;
 }
 
+/**
+ * The instant a row sorts and filters by, in epoch milliseconds.
+ *
+ * Ordering lives here, so `list_sessions` takes its timestamp comparator from this module too.
+ * Every row was validated before it could reach a sort (`validateHeaderLine` for a session header,
+ * the entry checks in `session-entries.ts`), and both read through `parseSessionInstant`, so this
+ * re-reads the same string by the same grammar. The `?? 0` exists to satisfy the type: it is
+ * unreachable for a row that made it into a result set.
+ */
+export function instantOf(session: SessionMetadata): number {
+  return parseSessionInstant(session.timestamp) ?? 0;
+}
+
 function compareByField(a: SessionMetadata, b: SessionMetadata, sortBy: SessionSortField): number {
   switch (sortBy) {
     case "timestamp":
-      return Date.parse(a.timestamp) - Date.parse(b.timestamp);
+      return instantOf(a) - instantOf(b);
     case "cwd":
       return compareStrings(a.cwd, b.cwd);
     case "path":
@@ -169,7 +146,7 @@ function comparatorOf(params: ListSessionsParams): (a: SessionMetadata, b: Sessi
   return (a, b) => {
     let result = compareByField(a, b, sortBy);
     if (result === 0 && sortBy !== "timestamp") {
-      result = Date.parse(a.timestamp) - Date.parse(b.timestamp);
+      result = instantOf(a) - instantOf(b);
     }
     // `path` is the documented unique handle, so it is the final tie-break and the order is total.
     if (result === 0) result = compareStrings(a.path, b.path);
@@ -187,7 +164,7 @@ function matchesRootOf(params: ListSessionsParams, window: TimeWindow): (session
       return false;
     }
 
-    const at = Date.parse(session.timestamp);
+    const at = instantOf(session);
     if (window.fromMs !== null && at < window.fromMs) return false;
     if (window.toMs !== null && (window.toInclusive ? at > window.toMs : at >= window.toMs)) return false;
 

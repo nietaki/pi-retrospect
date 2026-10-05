@@ -499,15 +499,20 @@ describe("readSessionEntries warnings", () => {
     ]);
   });
 
-  it("warns invalid_entry when timestamp is missing or not a real date", async () => {
-    await writeSession([entry({ timestamp: undefined }), entry({ timestamp: "yesterday" })]);
+  it("warns invalid_entry when timestamp is missing or has no instant", async () => {
+    await writeSession([
+      entry({ timestamp: undefined }),
+      entry({ timestamp: "yesterday" }),
+      entry({ timestamp: "2026-01-05T09:00:60Z" }),
+    ]);
 
     const result = await firstEntry();
 
     expect(result.entries).toStrictEqual([]);
     expect(result.warnings.map((warning) => warning.reason)).toStrictEqual([
-      "entry has no valid ISO 8601 timestamp",
-      "entry has no valid ISO 8601 timestamp",
+      "entry has no readable timestamp",
+      "entry has no readable timestamp",
+      "entry has no readable timestamp",
     ]);
   });
 

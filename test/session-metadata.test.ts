@@ -21,6 +21,7 @@ import {
   validateHeaderLine,
 } from "../src/session-metadata.ts";
 import type { HeaderResult, SessionHeaderValues } from "../src/session-metadata.ts";
+import { parseSessionInstant } from "../src/timestamps.ts";
 
 type FirstLineResult = Awaited<ReturnType<typeof readFirstLine>>;
 
@@ -185,12 +186,33 @@ describe("validateHeaderLine", () => {
       [JSON.stringify({ type: "session", id: "", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/r" }), /no id/],
       [JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T00:00:00.000Z" }), /no cwd/],
       [JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T00:00:00.000Z", cwd: "" }), /no cwd/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: "yesterday", cwd: "/r" }), /ISO 8601/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: 1_767_225_600_000, cwd: "/r" }), /ISO 8601/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: "2026-02-30T00:00:00.000Z", cwd: "/r" }), /ISO 8601/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: "2026-13-01T00:00:00.000Z", cwd: "/r" }), /ISO 8601/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T25:00:00.000Z", cwd: "/r" }), /ISO 8601/],
-      [JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01 10:00:00.000Z", cwd: "/r" }), /ISO 8601/],
+      [JSON.stringify({ type: "session", id: "a", timestamp: "yesterday", cwd: "/r" }), /readable timestamp/],
+      [
+        JSON.stringify({ type: "session", id: "a", timestamp: 1_767_225_600_000, cwd: "/r" }),
+        /readable timestamp/,
+      ],
+      // A month number with no instant behind it.
+      [
+        JSON.stringify({ type: "session", id: "a", timestamp: "2026-13-01T00:00:00.000Z", cwd: "/r" }),
+        /readable timestamp/,
+      ],
+      // Hour 25: `Date.parse` reads 24:00 as the next midnight and refuses 25:00 outright.
+      [
+        JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T25:00:00.000Z", cwd: "/r" }),
+        /readable timestamp/,
+      ],
+      // Second 60 has the right shape and no instant, which is why the impossible-timestamp fixture
+      // uses it rather than a February 30th.
+      [
+        JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-05T09:00:60Z", cwd: "/r" }),
+        /readable timestamp/,
+      ],
+      [JSON.stringify({ type: "session", id: "a", timestamp: "", cwd: "/r" }), /readable timestamp/],
+      // Trailing whitespace defeats the ISO branch, and there is no fallback that reads it.
+      [
+        JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T00:00:00.000Z ", cwd: "/r" }),
+        /readable timestamp/,
+      ],
       [
         JSON.stringify({ type: "session", id: "a", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/r", parentSession: 42 }),
         /parentSession is not a string/,
@@ -205,23 +227,37 @@ describe("validateHeaderLine", () => {
     }
   });
 
-  it("accepts leap-day and offset timestamps", () => {
+  it("accepts whatever the session parser can read, because the data path is liberal", () => {
+    // Pi writes `new Date().toISOString()` and nothing else, so this path keeps whatever
+    // `Date.parse` resolves to a finite instant and rejects the rest. That deliberately admits
+    // shapes the filter bounds refuse: a naive time read in the host zone, a date that rolled over,
+    // and a legacy string. A corrupt header is Pi's file, and refusing a rollover would mean
+    // maintaining a second grammar beside the one that sorts the rows.
     for (const timestamp of [
       "2028-02-29T10:00:00.000Z",
       "2026-01-01T10:00:00Z",
       "2026-01-01T10:00:00.123456Z",
       "2026-01-01T10:00:00+02:00",
+      "2026-01-01T10:00:00",
+      "2026-02-30T00:00:00.000Z",
+      "2026-02-29T10:00:00.000Z",
+      "2026-01-01T24:00:00.000Z",
+      "2026-01-01 10:00:00.000Z",
+      "Jan 2 2026",
+      "2026-01-05",
     ]) {
       const result = validateHeaderLine(JSON.stringify({ type: "session", id: "a", timestamp, cwd: "/r" }));
       expect(result.ok, `expected acceptance for: ${timestamp}`).toBe(true);
     }
 
-    // 2026 is not a leap year.
-    const rejected = validateHeaderLine(
-      JSON.stringify({ type: "session", id: "a", timestamp: "2026-02-29T10:00:00.000Z", cwd: "/r" }),
+    // The rolled-over reading is the one the sorters and windows use, so a February 30th lands on
+    // March 2nd rather than being dropped from the result set.
+    const rolled = validateHeaderLine(
+      JSON.stringify({ type: "session", id: "a", timestamp: "2026-02-30T00:00:00.000Z", cwd: "/r" }),
     );
 
-    expect(rejected.ok).toBe(false);
+    expect(valuesOf(rolled).timestamp).toBe("2026-02-30T00:00:00.000Z");
+    expect(parseSessionInstant(valuesOf(rolled).timestamp)).toBe(Date.parse("2026-03-02T00:00:00.000Z"));
   });
 });
 

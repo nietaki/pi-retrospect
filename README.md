@@ -48,7 +48,7 @@ matching parent always arrives with its complete subagent tree:
 | --- | --- | --- |
 | `cwds` | all working directories | Absolute `cwd`s to keep. |
 | `cwdMatch` | `"exact"` | `"sibling-prefix"` also keeps sibling directories whose basename extends the requested one — the shape of git worktrees placed next to the main checkout (a lexical path rule; no git metadata is read). |
-| `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds. A date is a **UTC** calendar day, and a date-only `endTimestamp` covers that whole day; a date-time must carry `Z` or `±HH:MM`. |
+| `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds, read in the **host timezone**: a bare date is one whole calendar day, and a date-time with no offset is local to the machine running the tool. |
 | `sortBy`, `sortDirection` | `"timestamp"`, `"asc"` | Top-level order only; children always stay in launch order. `"desc"` puts the newest first. |
 | `limit` | none | Cap on returned rows, after filtering and sorting. Headers are still all read. |
 

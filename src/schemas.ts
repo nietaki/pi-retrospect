@@ -54,13 +54,13 @@ export const ListSessionsParamsSchema = Type.Object(
     startTimestamp: Type.Optional(
       Type.String({
         description:
-          "Inclusive lower bound. An ISO 8601 date means the start of that UTC day; a date-time with an explicit timezone means that exact instant.",
+          "Inclusive lower bound. An ISO 8601 date means the start of that day in the host timezone; a date-time means that instant, also read in the host timezone when it carries no offset.",
       }),
     ),
     endTimestamp: Type.Optional(
       Type.String({
         description:
-          "Inclusive upper bound. An ISO 8601 date covers that whole UTC day; a date-time with an explicit timezone means that exact instant.",
+          "Inclusive upper bound. An ISO 8601 date covers that whole day in the host timezone; a date-time means that instant, also read in the host timezone when it carries no offset.",
       }),
     ),
     cwdMatch: Type.Optional(CwdMatchSchema),
@@ -92,7 +92,7 @@ export const SessionMetadataSchema = Type.Cyclic(
         path: Type.String({ description: "Absolute path to the session .jsonl file" }),
         timestamp: Type.String({
           format: "date-time",
-          description: "Header timestamp, ISO 8601, validated before the row is returned",
+          description: "Header timestamp as stored; a row is returned only when the session parser can read it",
         }),
         cwd: Type.String({ description: "Absolute working directory from the header" }),
         parentSessionPath: Type.Optional(
@@ -166,7 +166,7 @@ export const SessionFileEntrySchema = Type.Object(
     parentId: NullableString("Entry parentId; null for a root, an absent value, or a non-string"),
     timestamp: Type.String({
       format: "date-time",
-      description: "Entry timestamp, copied after ISO 8601 validation",
+      description: "Entry timestamp, copied verbatim only when the session parser can read it",
     }),
     type: Type.String({
       description: "Entry type, verbatim: unknown future types are preserved, not rejected",

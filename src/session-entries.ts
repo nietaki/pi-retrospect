@@ -22,7 +22,7 @@ import { isAbsolute, resolve, sep } from "node:path";
 
 import type { JsonObject } from "@earendil-works/pi-ai";
 
-import { isRealTimestamp } from "./session-metadata.ts";
+import { parseSessionInstant } from "./timestamps.ts";
 import type {
   SessionEntriesOutput,
   SessionEntriesParams,
@@ -194,8 +194,8 @@ function toEntry(
     return { reason: `a session header belongs on line 1, not line ${lineNo}` };
   }
 
-  if (typeof fields.timestamp !== "string" || !isRealTimestamp(fields.timestamp)) {
-    return { reason: "entry has no valid ISO 8601 timestamp" };
+  if (typeof fields.timestamp !== "string" || parseSessionInstant(fields.timestamp) === undefined) {
+    return { reason: "entry has no readable timestamp" };
   }
 
   return {
