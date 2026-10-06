@@ -303,8 +303,50 @@ describe("readSessionEntries entry mapping", () => {
       timestamp: "2026-01-01T10:00:01.000Z",
       type: "message",
       messageRole: "assistant",
+      text: null,
       raw: JSON.parse(entry({ id: "1111aaaa", parentId: "aaaa1111", message: { role: "assistant", content: [] } })),
     });
+  });
+
+  it("projects text from the parsed line beside raw, which stays untouched", async () => {
+    const line = entry({ message: { role: "user", content: [{ type: "text", text: "first" }, { type: "text", text: "second" }] } });
+    await writeSession([line]);
+
+    const [row] = await firstEntry().then((r) => r.entries);
+
+    expect(row?.text).toBe("first\nsecond");
+    expect(row?.raw).toStrictEqual(JSON.parse(line));
+  });
+
+  it("nulls text for a row whose entry type carries no prose", async () => {
+    await writeSession([entry({ type: "model_change", message: undefined, provider: "p", modelId: "m" })]);
+
+    const [row] = await firstEntry().then((r) => r.entries);
+
+    expect(row?.text).toBeNull();
+  });
+
+  it("keeps text on the rows a filter lets through", async () => {
+    await writeSession([
+      entry({ id: "u1", message: { role: "user", content: "asked" } }),
+      entry({ id: "c1", type: "compaction", message: undefined, summary: "compacted", firstKeptEntryId: "u1", tokensBefore: 10 }),
+    ]);
+
+    const { entries } = await readSessionEntries({ sessionPath: SESSION, types: ["compaction"] }, options);
+
+    expect(entries.map((row) => [row.id, row.text])).toStrictEqual([["c1", "compacted"]]);
+  });
+
+  it("projects text from a version 1 line whose ids are not citable", async () => {
+    await writeSession([entry({ message: { role: "user", content: "old but readable" } })]);
+
+    const v1 = join(ROOT, "--p--", "v1.jsonl");
+    await mkdir(dirname(v1), { recursive: true });
+    await writeFile(v1, `${header({ version: 1 })}\n${entry({ message: { role: "user", content: "old but readable" } })}\n`);
+
+    const [row] = await readSessionEntries({ sessionPath: v1 }, options).then((r) => r.entries);
+
+    expect([row?.id, row?.text]).toStrictEqual([null, "old but readable"]);
   });
 
   it("keeps messageRole null for non-message entries", async () => {

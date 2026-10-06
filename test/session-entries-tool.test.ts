@@ -136,6 +136,18 @@ describe("session_entries tool registration", () => {
     expect(entrySchema.additionalProperties).toBe(true);
   });
 
+  it("declares text as a required nullable string on every row", () => {
+    const row = tool.outputSchema as {
+      properties: { entries: { items: { properties: Record<string, { anyOf?: Array<{ type: string }> }>, required: string[] } } };
+    };
+    const { properties, required } = row.properties.entries.items;
+
+    // Always a key, never an absent one: the same presence rule `id`, `parentId`, and `messageRole`
+    // follow, so a caller can read `entry.text` without first asking whether the row carries it.
+    expect(required).toContain("text");
+    expect(properties.text?.anyOf?.map((clause) => clause.type)).toStrictEqual(["string", "null"]);
+  });
+
   it("describes confinement, the discarded header, the v1 rule, and the filters", () => {
     expect(tool.description).toContain("sessions root");
     expect(tool.description).toContain("session header");
@@ -144,6 +156,12 @@ describe("session_entries tool registration", () => {
     expect(tool.description).toContain("ANDed");
     expect(tool.description).toContain("startLineNo");
     expect(tool.description).toContain("warnings describe the whole file");
+  });
+
+  it("names the text projection and what it leaves out", () => {
+    expect(tool.description).toContain("text");
+    expect(tool.description).toContain("thinking");
+    expect(tool.description).toMatch(/never a copy|not a copy|never copies/i);
   });
 });
 

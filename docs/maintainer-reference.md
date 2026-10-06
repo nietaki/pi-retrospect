@@ -241,7 +241,10 @@ instead of prose.
 `src/session-entries-tool.ts` is the factory-wrapped tool, same shape as the listing. Confinement,
 header checks, and line mapping live in that one module; the filter and cap parameters live in
 `src/entry-query.ts`, which the reader calls **before** it resolves the path — a nonsense bound is
-the caller's mistake and must outrank both a confinement failure and a missing file.
+the caller's mistake and must outrank both a confinement failure and a missing file. The `text`
+projection lives on its own in `src/entry-text.ts`: it is a pure function of the parsed line, so every
+mapping rule is testable without a file, and the reader cannot accidentally make a row's *shape*
+depend on whether it had text.
 
 **Filters narrow the result, never the scan.** The loop builds every row `toEntry` accepts and then
 drops the ones `query.matches` rejects or `query.limit` has already filled, so a filtered row costs
@@ -317,6 +320,7 @@ difference, and it is the accepted rule above, not an accident.
 | `id` | non-empty string **and** a header `version` of at least 2, else `null`. Never rejects a line |
 | `parentId` | same rule as `id`: non-empty string in a v2+ file, else `null` (a root, an absent field, or a non-string all read as null) |
 | `messageRole` | the `message.role` string when `type === "message"`, else `null` |
+| `text` | `entryText(raw)` from `src/entry-text.ts` — the entry's primary human-readable body, or `null`; never a rejection reason, since a row with no text is still a row |
 | `raw` | the parsed line, cast to `JsonObject` — safe by construction, it came from `JSON.parse` |
 
 `id` and `parentId` cannot be acceptance criteria — a missing one is a null, not a rejected row — and
@@ -501,7 +505,8 @@ defineTool({
 `src/index.ts` registers both against the same `join(getAgentDir(), "sessions")` root. The
 `session_entries` description must keep stating what a caller cannot infer from the parameter
 names alone: that the path is confined to the sessions root, that line 1 is the header and is never
-returned, that `raw` is the whole line and can be megabytes, that entries arrive in file order with
+returned, that `raw` is the whole line and can be megabytes, that `text` is a projection rather than a
+copy of it and what it deliberately leaves out, that entries arrive in file order with
 every branch included and order is not configurable, that filters are ANDed with OR inside one array
 and match the returned field exactly, that a `null` field matches no array value, that warnings
 describe the whole file whatever the filters say, and that version 1 rows come back with null ids.
@@ -546,7 +551,9 @@ Warnings (2)
   is available to scripts regardless.
 
 `session_entries` renders an index of lines and never a payload — one `lineNo type role id` bullet
-per row, with `raw` left out entirely because a single entry can exceed the context window:
+per row, with `raw` left out entirely because a single entry can exceed the context window, and
+`text` left out for the same reason in miniature: it is bounded only by the entry it came from
+(measured max 51 KB), so a row's rendered length must not depend on its payload:
 
 ```
 Entries (2)
@@ -617,15 +624,19 @@ parent/child trees for spot-checks — see TODOs.
 
 `session_entries` is covered by `test/session-entries.test.ts` (confinement, header rules, physical
 line numbers, arbitrary `raw`, the three warning codes, v1 nulls, abort),
+`test/entry-text.test.ts` (the whole `text` mapping: each qualifying type and role, the content-array
+join, what is excluded — thinking, tool calls, images, a bash execution's output, state-only and
+unknown kinds — and the null-instead-of-empty-string rule),
 `test/session-entries-filters.test.ts` (every filter parameter: inclusive line bounds, exact and
 case-sensitive sets, null fields that match nothing, the shared timestamp window, a `limit` that
 does not shorten the scan, AND across categories with OR inside one array, and pagination by
 `startLineNo`), and
 `test/session-entries-tool.test.ts` (registration shape, the filter parameter declarations, open
-`raw` subschema, structured output equality, filters passed through `execute`, rendered rows, entry
+`raw` subschema, the required nullable `text` declaration, structured output equality, filters passed
+through `execute`, rendered rows, entry
 point registering both tools), plus a describe block in
-`test/content.test.ts` for `renderSessionEntriesContent` (row columns, no `raw` leak, the empty
-header, and the `file` versus `line N` warning prefixes). Its fixtures are throwaway files under
+`test/content.test.ts` for `renderSessionEntriesContent` (row columns, no `raw` and no `text` leak, the
+empty header, and the `file` versus `line N` warning prefixes). Its fixtures are throwaway files under
 `test/tmp/session-entries*/` written by the tests themselves, not entries in
 `test/fixtures/sessions/`: adding a multi-entry file there would change the row and warning counts
 that `test/list-sessions.test.ts` asserts exactly.
@@ -634,7 +645,10 @@ Live-store spot-checks live in `scratch/` (not the suite, not the tarball, and n
 `node --experimental-strip-types scratch/entries-smoke.mts` reads one real session and rejects
 `/etc/hosts`; `scratch/entries-size.mts` reports what the largest sessions return;
 `scratch/entries-store.mts` reads every parent session; `scratch/entries-artifacts.mts` walks every
-`.jsonl` under the root recursively. Measured 2026-10-02: of 215 `.jsonl` files under the root, 204
+`.jsonl` under the root recursively; `scratch/text-probe.mts` reports `text` coverage, mean, and max
+per entry kind over every parent session, which is where the ratios quoted in "The `text` projection"
+come from; `scratch/text-live.mts` re-derives a user row's expected `text` from its own `raw` on live
+files and throws on any disagreement. Measured 2026-10-02: of 215 `.jsonl` files under the root, 204
 read with **0 warnings** and the other 11 — every `subagent-artifacts/*_transcript.jsonl` dump in the
 store, counted independently — refused by the header check with no other error class appearing. Every
 parent session read together: 145 files, 15,928 entries, 0 warnings, ~250 ms. `raw` came back within a
@@ -696,6 +710,13 @@ timestamp window, and a `limit` all read the same file and report the same skips
   direction, most likely `excludePaths`), and a depth limit for `subagentSessions`. Entry-level
   searches over `raw` — text, substrings, a field path — are deliberately absent: they would need an
   index to be worth the scan, and none exists.
+- **Decide the search surface over `text`.** `text` now gives every row one canonical string, so a
+  search has something to run over without re-walking content blocks per role. Undecided: whether it
+  filters inside this reader (a substring or regex parameter, whole-file scan, no index) or belongs to
+  a separate operation with an index; whether it covers `text` only; and how thinking is reached if it
+  is ever searched at all — a separate opt-in field or search scope, never folded into `text`, which is
+  what keeps "what the model said" separable from "how it got there" and stops reasoning from drowning
+  the hits (measured: 4,378 of 6,867 assistant rows have thinking and no visible text).
 - **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
   (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for
   this project" rather than like a mistake. Two ways out, not chosen yet: reject a

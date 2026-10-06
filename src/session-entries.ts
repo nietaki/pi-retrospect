@@ -29,6 +29,7 @@ import type { JsonObject } from "@earendil-works/pi-ai";
 
 import { parseSessionInstant } from "./timestamps.ts";
 import { buildEntryQuery } from "./entry-query.ts";
+import { entryText } from "./entry-text.ts";
 import type {
   SessionEntriesOutput,
   SessionEntriesParams,
@@ -223,6 +224,9 @@ function messageRoleOf(entry: Record<string, unknown>): string | null {
  * inventing one, and the row is still readable and addressable by `lineNo`.
  *
  * `type` and `timestamp` are required, because a row without them cannot be described or ordered.
+ *
+ * `text` is derived from the same parsed line by `entry-text.ts`, and is never a second copy of `raw`:
+ * it is the entry's one primary human-readable payload, or null when it has none.
  */
 function toEntry(
   lineNo: number,
@@ -259,6 +263,7 @@ function toEntry(
     timestamp: fields.timestamp,
     type: fields.type,
     messageRole: messageRoleOf(fields),
+    text: entryText(fields),
     // Safe by construction: `parsed` came out of `JSON.parse`, so it is JSON.
     raw: parsed as JsonObject,
   };

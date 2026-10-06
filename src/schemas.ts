@@ -155,6 +155,9 @@ export const JsonObjectSchema = Type.Unsafe<JsonObject>({
  * `lineNo` is the durable handle. `id` and `parentId` describe what a caller may cite, not what the
  * bytes say: Pi writes them from session version 2 on, and `migrateV1ToV2` overwrites every id in a
  * version 1 file — stored ones included — so a version 1 row reports `null` and `raw` keeps the text.
+ *
+ * `text` is a projection of the entry's primary human-readable body (see `entry-text.ts`), never a
+ * serialization of `raw`: null when the entry has no textual payload or that payload holds no text.
  */
 export const SessionFileEntrySchema = Type.Object(
   {
@@ -172,6 +175,9 @@ export const SessionFileEntrySchema = Type.Object(
       description: "Entry type, verbatim: unknown future types are preserved, not rejected",
     }),
     messageRole: NullableString('Message role of a "message" entry, else null'),
+    text: NullableString(
+      "Primary human-readable text projected from the entry: message content (user, assistant visible text, tool result, system, custom), a custom_message content, a compaction or branch_summary summary, a context_edit replacement, a session_info name, a usage note, a label, or a bashExecution command. Null when the entry has no such payload, and for assistant thinking, tool calls, and images.",
+    ),
     raw: JsonObjectSchema,
   },
   { additionalProperties: false, description: "One session entry, with its raw JSON" },

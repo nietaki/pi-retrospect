@@ -289,7 +289,8 @@ adds no warning.
 ### Purpose
 
 `session_entries` reads one session file and returns its entries, each addressed by its physical
-line number and carrying the parsed line unchanged as `raw`. It is the step after `list_sessions`:
+line number and carrying the parsed line unchanged as `raw`, plus `text`: the entry's primary
+human-readable body when it has one, projected from that line. It is the step after `list_sessions`:
 that operation names transcript files, this one opens one.
 
 Optional parameters filter the rows — a line range, id and parent sets, entry types, message roles,
@@ -426,7 +427,7 @@ const { entries } = await tools.session_entries({
   messageRoles: ["user"],
 });
 
-return entries.at(-1)?.raw.message.content;
+return entries.at(-1)?.text;
 ```
 
 Every tool result that errored, without reading the rows in between:
@@ -489,6 +490,7 @@ type SessionFileEntry = {
   timestamp: string;           // entry timestamp, as stored, once the session parser can read it
   type: string;                // verbatim — an unknown type is preserved, not rejected
   messageRole: string | null;  // role of a "message" entry, else null
+  text: string | null;         // the entry's primary human-readable body, else null (see below)
   raw: object;                 // the whole parsed line, unchanged
 };
 
@@ -508,6 +510,67 @@ type SessionEntriesWarning = {
 `raw` is the parsed line exactly as stored — Pi's fields, plus anything a newer Pi or an extension
 wrote, including fields this package has never seen. Nothing is decoded, re-encoded, reordered, or
 dropped from it.
+
+### The `text` projection
+
+`text` answers the question a caller would otherwise ask `raw` about: what did this entry actually
+say. It is **one field per entry that already has a text form in the stored data** — never a
+serialization of `raw`, and never a rendering of a field that has no text form.
+
+| Entry | Source |
+| --- | --- |
+| `message` / `user`, `system`, `toolResult`, `custom` | `message.content` |
+| `message` / `assistant` | the `type: "text"` blocks of `message.content` — **not** thinking, tool calls, or images |
+| `message` / `bashExecution` | `message.command` only |
+| `message` / `branchSummary`, `compactionSummary` | `message.summary` |
+| `custom_message` | `content` |
+| `compaction`, `branch_summary` | `summary` |
+| `context_edit` | `replacement.content` — null when `replacement` is null (an omission has no text) |
+| `session_info` | `name` |
+| `usage` | `note` — the token and cost numbers are not text |
+| `label` | `label` — null when the row clears a label |
+| `custom`, `model_change`, `thinking_level_change`, any unknown type, any unknown role | null |
+
+The rules that hold across the table:
+
+- **A content array contributes its `type: "text"` blocks, joined with `"\n"`.** Images contribute
+  nothing (`data` is base64, and a single image block costs more than the median session's entire
+  visible conversation), and a block that is malformed — missing `text`, or `text` not a string — is
+  dropped rather than poisoning the join.
+- **Assistant thinking is never in `text`.** It is natural language and would be findable, but it is
+  the model's reasoning rather than what it said, and measured on one store it *outlines* visible
+  text: two of every three assistant rows carry thinking and no visible text at all, so folding it in
+  would make `text` mostly reasoning. It stays in `raw.message.content`, reachable per block type.
+- **No rendering of state.** A `model_change` has a provider and a model id, and a `custom` entry has
+  extension `data` that may be a string by coincidence. Turning either into text would invent a
+  presentation and put it in the data layer.
+- **`null`, never `""`.** A row whose source is absent (a `session_info` with no `name`), empty
+  (a content array holding no text), or unrecognized gets `null`. The field is always present on the
+  row — it is a `string | null`, like `id`, `parentId`, and `messageRole`, not an optional key.
+- **Nothing is trimmed or truncated.** Pi's bytes survive: `"  keep the padding \n"` comes back with
+  its padding. `text` is bounded only by the entry it was projected from, so a row can still be large —
+  measured 2026-10-05 over every parent session in the author's store (≈17,000 rows): 63% of rows carry
+  text, mean 1.9 KB, max 51 KB, and a `compaction` summary averages 9.8 KB on its own. `limit` and the
+  filters remain the only bound on a result.
+
+Coverage by kind on that same store, as ratios rather than totals (a session store grows daily, so
+re-measure rather than trusting these — see `docs/maintainer-reference.md`): **every** `toolResult`,
+`custom_message`, `compaction`, `session_info`, and `bashExecution` row had text; `user` rows were
+99.5%, the misses carrying content with no text in it; `assistant` rows were about a third, the rest
+thinking and tool calls only. **No** `system` row had any: Pi persists the prompt with an empty
+`content` string and its body in the `sections` map, which is structured state rather than one textual
+payload — so `text` is not a way to read a session's system prompt, and `raw.message.sections` is.
+None of the measured `context_edit` rows carried a replacement either: all of them omitted their
+target, which is the `null` branch.
+
+The point of the field is that the common read needs no knowledge of Pi's content-block shapes:
+
+```js
+// every prompt the user typed, in file order, without touching raw
+const { entries } = await tools.session_entries({ sessionPath, messageRoles: ["user"] });
+
+return entries.flatMap((e) => (e.text === null ? [] : [{ lineNo: e.lineNo, text: e.text }]));
+```
 
 ### What this is not
 
@@ -535,13 +598,17 @@ dropped from it.
    file. What the line actually stored stays visible in `raw`.
 3. `messageRole` is non-null only for `type === "message"`, and is the stored role verbatim —
    including a role this package has never seen.
-4. Each skipped line produces exactly one warning, in line order, **whatever the filters are**: a
+4. `text` is present on every row, and is `null` unless the entry has a recognized textual payload
+   that holds text. It is projected from `raw` and never replaces it: whatever `text` leaves out
+   (thinking, tool calls, images, a bash execution's output, every field of a state-only entry) is
+   still in `raw`, unchanged. See "The `text` projection" above for the mapping and its measurements.
+5. Each skipped line produces exactly one warning, in line order, **whatever the filters are**: a
    limited or windowed read still reports every line of the file that could not become an entry, and
    a row excluded by a filter produces none. So `warnings` always accounts for the file, and
    `entries` accounts only for the rows that were asked for.
-5. Filters never reorder or renumber: `entries` stays a subsequence of the file's own order, and a
+6. Filters never reorder or renumber: `entries` stays a subsequence of the file's own order, and a
    `lineNo` read from one call means the same line in another call against the same bytes.
-6. Nothing is written. The file is neither migrated nor repaired.
+7. Nothing is written. The file is neither migrated nor repaired.
 
 ### Limitations
 

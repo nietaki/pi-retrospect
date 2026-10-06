@@ -115,6 +115,7 @@ const MESSAGE_ROW: SessionFileEntry = {
   timestamp: "2026-01-01T10:00:01.000Z",
   type: "message",
   messageRole: "user",
+  text: "SECRET TEXT PROJECTION",
   raw: { id: "aaaa1111", message: { content: "SECRET PAYLOAD" } },
 };
 
@@ -124,6 +125,7 @@ const ADDRESSLESS_ROW: SessionFileEntry = {
   id: null,
   type: "model_change",
   messageRole: null,
+  text: null,
   raw: {},
 };
 
@@ -141,6 +143,15 @@ describe("renderSessionEntriesContent", () => {
 
     expect(text).not.toContain("SECRET PAYLOAD");
     expect(text).not.toContain("raw");
+  });
+
+  it("never renders the text projection either, so a row stays one line long", () => {
+    // `text` is bounded only by the entry it came from: a tool result can carry 16 KB of it. The
+    // rendered index is a table of contents, so a row's length must not depend on its payload.
+    const text = renderSessionEntriesContent({ entries: [MESSAGE_ROW], warnings: [] });
+
+    expect(text).not.toContain("SECRET TEXT PROJECTION");
+    expect(text.split("\n")).toStrictEqual(["Entries (1)", "- 2 message user aaaa1111"]);
   });
 
   it("omits the warnings section when there are none", () => {
