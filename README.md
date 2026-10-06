@@ -7,9 +7,9 @@ the conversation where it hit a given error, recover a decision it made, and aud
 what actually happened before repeating it.
 
 **Status: 0.x, early.** Two operations are implemented — `list_sessions` (find session files) and
-`session_entries` (read the entries inside one), both codemode-callable; see
-[`docs/tool-api.md`](docs/tool-api.md) for their contracts. Anything beyond reading history —
-searching it, ranking it, or writing back — stays out of scope until it is discussed.
+`session_entries` (read the entries inside one, filter them, and search their text), both
+codemode-callable; see [`docs/tool-api.md`](docs/tool-api.md) for their contracts. Anything beyond
+reading history — ranking it, or writing back — stays out of scope until it is discussed.
 
 ## Install
 
@@ -94,12 +94,22 @@ header all throw.
 | `startLineNo`, `endLineNo` | unbounded | Inclusive physical line bounds. |
 | `ids`, `parentIds` | unfiltered | Exact, case-sensitive sets of entry ids. A `null` field matches nothing, so a version 1 file is never selected. |
 | `types`, `messageRoles` | unfiltered | Exact, case-sensitive sets. `messageRoles` reaches only `type: "message"` rows. |
+| `search` | unfiltered | Literal substring search over `text`: `{ terms: string[], caseSensitive?: boolean }`. A row matches when its non-null `text` contains **any** term. Case-insensitive by default. |
 | `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds on each entry's own timestamp, read in the host timezone — the same grammar `list_sessions` uses. |
 | `limit` | none | Cap on returned entries, applied after filtering. |
 
 Filters are ANDed, values inside one array are ORed, and order is never configurable: rows come back
 in file order. Filtering narrows the **result**, never the **scan** — `warnings` still describe the
 whole file. To page, pass `startLineNo` one past the last `lineNo` you already read.
+
+`search` is the one filter that is not exact. Terms are literal bytes — no pattern, no tokenization,
+no glob — so `["h.llo"]` matches only `h.llo` and `["the"]` matches inside `there`; a term of `""` and
+an empty `terms` array are refused rather than read as "every row". It runs over `text`, never `raw`,
+so thinking, tool calls, images, and the output of a `!` shell run are unreachable (they are still in
+`raw` for a script to filter), and a row whose `text` is null is never a hit. Because a `system` row's
+`text` is that message's rendered prompt, an ordinary word matches harness text — the preamble, the
+tool rules, every `AGENTS.md` — so AND the search with `types` or `messageRoles` when the question is
+about what was said.
 
 ```js
 // in a codemode script — project the rows in the script, never hand `raw` to a model
@@ -118,6 +128,17 @@ return entries.map((entry) => ({
 }));
 ```
 
+```js
+// in a codemode script — the rows that mention one error, in the conversation only
+const { entries } = await tools.session_entries({
+  sessionPath,
+  search: { terms: ["ETIMEDOUT", "connection timed out"] },
+  messageRoles: ["user", "assistant", "toolResult"],
+});
+
+return entries.map((entry) => ({ lineNo: entry.lineNo, role: entry.messageRole, text: entry.text }));
+```
+
 `raw` is unbounded per row — as large as the entries it keeps (a 2.4 MB session returned 2.46 MB of
 `raw`) — and `text` is bounded only by the entry it was projected from (measured max 51 KB on a tool
 result), so it is a codemode-only tool by design. A `system` row is the largest category `text` carries
@@ -134,8 +155,8 @@ is the handle that stays valid, and `raw` keeps what was written.
 
 - [`docs/tool-api.md`](docs/tool-api.md) — the contract for the operations this
   package exposes: `list_sessions` (discovery rules, filters, ordering, guarantees) and
-  `session_entries` (sessions-root confinement, line addressing, entry filters, the `text`
-  projection, `raw`, warning codes).
+  `session_entries` (sessions-root confinement, line addressing, entry filters, the literal
+  `text` search, the `text` projection, `raw`, warning codes).
 - `test/fixtures/generate.mjs` (source repository, not in the npm tarball) — rebuilds
   the synthetic session tree the tests run against.
 

@@ -215,6 +215,38 @@ const ValueSet = (item: string, description: string) =>
   Type.Array(Type.String({ minLength: 1, description: item }), { minItems: 1, description });
 
 /**
+ * A literal substring search over the `text` projection.
+ *
+ * Deliberately narrower than it could be. It is not a pattern and not a query language: a plain
+ * `includes` per term needs no escaping rules, no parser, and no regex engine that can be made to
+ * hang on a 50 KB row. It is not a search of `raw` either, so thinking, tool-call arguments, and
+ * images stay unreachable here and a caller that wants them filters `raw` in its own script.
+ *
+ * Case folding is `String.prototype.toLowerCase` — Unicode-simple and locale-independent, so it
+ * folds `Ü` and `ü` but never performs a locale-aware fold of `İ`.
+ */
+const SearchFilter = Type.Object(
+  {
+    terms: ValueSet(
+      "Literal substring to look for in the entry's `text`",
+      "Terms to look for. An entry matches when its `text` contains any one of them: terms never combine. Pi coerces toward the declared type before this runs, so a bare string becomes a one-term set and `null` becomes the term `null` — omit `search` entirely for no search.",
+    ),
+    caseSensitive: Type.Optional(
+      Type.Boolean({
+        default: false,
+        description:
+          "Match exact case. Defaults to false, where `HELLO` and `hello` are the same term; `true` asks for the case as written.",
+      }),
+    ),
+  },
+  {
+    additionalProperties: false,
+    description:
+      "Literal text search over `text`: keep the entries whose non-null `text` contains any term. Never searches `raw`, never a pattern, and an empty set or an empty term is refused rather than read as every row.",
+  },
+);
+
+/**
  * Parameters for `readSessionEntries`: the single session file to read, plus optional filters.
  *
  * Every filter is optional and the result is their AND; values inside one array are ORed. Filters
@@ -278,6 +310,7 @@ export const SessionEntriesParamsSchema = Type.Object(
         "Roles to keep, compared against `messageRole`. Only a `type: \"message\"` entry carries one, so a non-message row is never selected by any value here.",
       ),
     ),
+    search: Type.Optional(SearchFilter),
     limit: Type.Optional(
       Type.Integer({
         minimum: 1,

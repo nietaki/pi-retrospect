@@ -1,6 +1,6 @@
 /**
- * Parameter behavior of `session_entries`: line ranges, id/parent/type/role sets, timestamp
- * windows, and a limit applied after filtering.
+ * Parameter behavior of `session_entries`: line ranges, id/parent/type/role sets, literal `text`
+ * search, timestamp windows, and a limit applied after filtering.
  *
  * Filters narrow `entries` only. `warnings` always describe the whole file — a filtered or
  * limited read is still a full scan — so every case here asserts both halves.
@@ -21,6 +21,7 @@ import type { SessionEntriesParams } from "../src/schemas.ts";
 const TEMP = new URL("tmp/session-entries-filters/", import.meta.url).pathname;
 const ROOT = join(TEMP, "root");
 const SESSION = join(ROOT, "--p--", "s.jsonl");
+const SEARCH_SESSION = join(ROOT, "--p--", "search.jsonl");
 
 function header(fields: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -89,6 +90,77 @@ async function readGrid(filters: Omit<SessionEntriesParams, "sessionPath"> = {})
     lineNos: output.entries.map((entryRow) => entryRow.lineNo),
     types: output.entries.map((entryRow) => entryRow.type),
     roles: output.entries.map((entryRow) => entryRow.messageRole),
+    warnings: output.warnings.map((warning) => [warning.lineNo, warning.code]),
+  };
+}
+
+/**
+ * The rows every `search` case reads.
+ *
+ * Chosen to separate what a text filter can reach from what it cannot: one row whose projected
+ * `text` is `null` while its `raw` carries the search term anyway, one non-message row whose text
+ * comes from `summary`, one broken line, and rows whose case and line breaks differ:
+ *
+ * | line | id  | `text`                      |
+ * | ---- | --- | --------------------------- |
+ * | 2    | s1  | `"Hello\nthere"`            |
+ * | 3    | s2  | `"a HELLO B"`               |
+ * | 4    | —   | not an entry                |
+ * | 5    | s3  | `"goodbye"`                 |
+ * | 6    | s4  | `null` (`raw` says "hello") |
+ * | 7    | s5  | `"the summary mentions Hello"` |
+ * | 8    | s6  | `"multi\nline hello world"` |
+ */
+const SEARCH_GRID = (): string[] => [
+  entry({
+    id: "s1",
+    message: { role: "user", content: [{ type: "text", text: "Hello" }, { type: "text", text: "there" }] },
+  }),
+  entry({
+    id: "s2",
+    parentId: "s1",
+    timestamp: "2026-01-02T10:00:02.000Z",
+    message: { role: "assistant", content: [{ type: "text", text: "a HELLO B" }] },
+  }),
+  "{ broken",
+  entry({
+    id: "s3",
+    parentId: "s2",
+    timestamp: "2026-01-03T10:00:03.000Z",
+    message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "goodbye" }] },
+  }),
+  entry({
+    id: "s4",
+    parentId: null,
+    timestamp: "2026-02-01T00:00:00.000Z",
+    type: "model_change",
+    message: undefined,
+    provider: "hello",
+    modelId: "hello/model",
+  }),
+  entry({
+    id: "s5",
+    parentId: "s4",
+    timestamp: "2026-02-05T23:59:59.000Z",
+    type: "compaction",
+    message: undefined,
+    summary: "the summary mentions Hello",
+  }),
+  entry({
+    id: "s6",
+    parentId: "s5",
+    timestamp: "2027-06-01T12:00:00.000Z",
+    message: { role: "user", content: [{ type: "text", text: "multi\nline hello world" }] },
+  }),
+];
+
+/** Read the search grid, returning the kept line numbers beside the whole-file warnings. */
+async function readSearch(filters: Omit<SessionEntriesParams, "sessionPath">) {
+  const output = await readSessionEntries({ sessionPath: SEARCH_SESSION, ...filters }, options);
+
+  return {
+    ids: output.entries.map((entryRow) => entryRow.id),
+    lineNos: output.entries.map((entryRow) => entryRow.lineNo),
     warnings: output.warnings.map((warning) => [warning.lineNo, warning.code]),
   };
 }
@@ -397,6 +469,136 @@ describe("session_entries limit", () => {
     await expect(readGrid({ limit: 0 })).rejects.toThrow(/limit/);
     await expect(readGrid({ limit: -3 })).rejects.toThrow(/limit/);
     await expect(readGrid({ limit: 1.5 })).rejects.toThrow(/limit/);
+  });
+});
+
+describe("session_entries text search", () => {
+  it("is case-insensitive by default", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["hello"] } })).lineNos).toStrictEqual([2, 3, 7, 8]);
+    expect((await readSearch({ search: { terms: ["HELLO"] } })).lineNos).toStrictEqual([2, 3, 7, 8]);
+    expect((await readSearch({ search: { terms: ["hello"], caseSensitive: false } })).lineNos).toStrictEqual([
+      2, 3, 7, 8,
+    ]);
+  });
+
+  it("matches the case exactly only when asked to", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["hello"], caseSensitive: true } })).lineNos).toStrictEqual([8]);
+    expect((await readSearch({ search: { terms: ["HELLO"], caseSensitive: true } })).lineNos).toStrictEqual([3]);
+  });
+
+  it("is a substring test, not a word or a pattern", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["ell"] } })).ids).toStrictEqual(["s1", "s2", "s5", "s6"]);
+    expect((await readSearch({ search: { terms: ["the"] } })).ids, "'the' inside 'there' too").toStrictEqual([
+      "s1",
+      "s5",
+    ]);
+    expect((await readSearch({ search: { terms: ["h.llo"] } })).ids, "a dot matches no wildcard").toStrictEqual([]);
+    expect((await readSearch({ search: { terms: ["hello*"] } })).ids).toStrictEqual([]);
+  });
+
+  it("matches across the newlines the projection joins", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["Hello\nthere"] } })).ids).toStrictEqual(["s1"]);
+    expect((await readSearch({ search: { terms: ["line hello"] } })).ids).toStrictEqual(["s6"]);
+  });
+
+  it("a row matches when any term occurs, and terms never combine", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    const result = await readSearch({ search: { terms: ["goodbye", "summary"] } });
+
+    expect(result.lineNos).toStrictEqual([5, 7]);
+    expect((await readSearch({ search: { terms: ["nope", "nobody", "nothing here"] } })).ids).toStrictEqual([]);
+  });
+
+  it("searches `text` and never `raw`, so a null projection matches nothing", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    // Line 6 is a `model_change` whose `raw` stores "hello" twice and whose `text` is null.
+    const result = await readSearch({ search: { terms: ["hello"] } });
+
+    expect(result.lineNos).toStrictEqual([2, 3, 7, 8]);
+    expect((await readSearch({ search: { terms: ["model_change", "provider"] } })).ids).toStrictEqual([]);
+  });
+
+  it("reaches the text a non-message entry carries", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["summary mentions"] } })).ids).toStrictEqual(["s5"]);
+    expect((await readSearch({ search: { terms: ["mentions"] }, types: ["compaction"] })).ids).toStrictEqual(["s5"]);
+  });
+
+  it("folds case with Unicode lowercase, not ASCII only", async () => {
+    await writeSession(
+      [entry({ id: "u1", message: { role: "user", content: [{ type: "text", text: "Ünified" }] } })],
+      SEARCH_SESSION,
+    );
+
+    expect((await readSearch({ search: { terms: ["ünified"] } })).ids).toStrictEqual(["u1"]);
+    expect((await readSearch({ search: { terms: ["ünified"], caseSensitive: true } })).ids).toStrictEqual([]);
+  });
+
+  it("is one filter category among others: the categories AND and the limit comes after", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({ search: { terms: ["hello"] }, messageRoles: ["assistant"] })).lineNos).toStrictEqual([
+      3,
+    ]);
+    expect((await readSearch({ search: { terms: ["hello"] }, types: ["message"] })).lineNos).toStrictEqual([2, 3, 8]);
+    expect((await readSearch({ search: { terms: ["hello"] }, startLineNo: 4, limit: 1 })).lineNos).toStrictEqual([7]);
+    expect((await readSearch({ search: { terms: ["hello"] }, ids: ["s2"] })).lineNos).toStrictEqual([3]);
+    expect((await readSearch({ search: { terms: ["goodbye"] }, ids: ["s2"] })).ids).toStrictEqual([]);
+  });
+
+  it("never shortens the scan: a search read still reports whole-file warnings", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    const result = await readSearch({ search: { terms: ["no such text"] } });
+
+    expect(result.ids).toStrictEqual([]);
+    expect(result.warnings).toStrictEqual([[4, "invalid_json"]]);
+  });
+
+  it("refuses an empty term set by name", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    await expect(readSearch({ search: { terms: [] } })).rejects.toThrow(/search\.terms/);
+    await expect(readSearch({ search: { terms: [""] } })).rejects.toThrow(/search\.terms/);
+    await expect(readSearch({ search: { terms: ["goodbye", ""] } })).rejects.toThrow(/search\.terms/);
+
+    // The registered schema refuses a non-array, but `readSessionEntries` is also the library
+    // surface, so the guard has to hold for a caller who comes straight to it.
+    await expect(readSearch({ search: { terms: "hello" as unknown as string[] } })).rejects.toThrow(
+      /search\.terms/,
+    );
+  });
+
+  it("a bad search outranks the filesystem: a nonsense filter never opens a file", async () => {
+    await mkdir(ROOT, { recursive: true });
+
+    await expect(
+      readSessionEntries(
+        { sessionPath: join(ROOT, "--p--", "missing.jsonl"), search: { terms: [""] } },
+        options,
+      ),
+    ).rejects.toThrow(/search\.terms/);
+
+    await expect(
+      readSessionEntries({ sessionPath: "/definitely/not/here/sessions/x.jsonl", search: { terms: [] } }, options),
+    ).rejects.toThrow(/search\.terms/);
+  });
+
+  it("is absent by default, so the same rows return without it", async () => {
+    await writeSession(SEARCH_GRID(), SEARCH_SESSION);
+
+    expect((await readSearch({})).lineNos).toStrictEqual([2, 3, 5, 6, 7, 8]);
   });
 });
 

@@ -21,6 +21,57 @@ import { requireLimit, timeWindowOf, withinWindow } from "./filters.ts";
 import type { TimeWindow } from "./filters.ts";
 import type { SessionEntriesParams, SessionFileEntry } from "./schemas.ts";
 
+/**
+ * A prepared `search`: ask it of one row's `text`.
+ *
+ * It is a predicate over `text` alone, never over `raw`, because `text` is the field this tool
+ * documents as the human-readable body of an entry: searching `raw` would match tool names, JSON
+ * keys, base64 image payloads, and — if thinking were ever folded in — reasoning.
+ */
+export type TextSearch = (text: string | null) => boolean;
+
+/**
+ * Turn the `search` parameter into a predicate, or throw on the first unusable value.
+ *
+ * Terms are literal substrings matched with OR, which is the rule every other set filter follows, and
+ * the reason is escaping: an agent that writes `["C:\\path"]` or `["price("]` means those bytes, not a
+ * pattern. An empty set or an empty term is refused rather than silently meaning "every row" — a
+ * `terms: [""]` read as a match-all would look like a working filter while returning everything.
+ *
+ * Case-insensitive is the default because ordinary search is what a caller means by "search", and
+ * folding is `String.prototype.toLowerCase`: locale-independent, so an `İ` in a Turkish log line is
+ * not folded the way a Turkish speaker's collation would fold it.
+ */
+function requireSearch(search: SessionEntriesParams["search"]): TextSearch | undefined {
+  if (search === undefined) return undefined;
+
+  const { terms, caseSensitive } = search;
+
+  if (!Array.isArray(terms) || terms.length === 0) {
+    throw new Error("search.terms must hold at least one term");
+  }
+
+  // Folded once here rather than per row: a scan of a 2.4 MB session asks the same question of
+  // every line, and the terms never change.
+  const needles = terms.map((term, index) => {
+    if (typeof term !== "string" || term === "") {
+      throw new Error(`search.terms[${index}] must be a non-empty string`);
+    }
+
+    return caseSensitive === true ? term : term.toLowerCase();
+  });
+
+  return (text) => {
+    // A row with no projected text cannot match, whatever its `raw` holds. This is the same rule a
+    // null field already follows in `ids` and `messageRoles`.
+    if (text === null) return false;
+
+    const haystack = caseSensitive === true ? text : text.toLowerCase();
+
+    return needles.some((needle) => haystack.includes(needle));
+  };
+}
+
 /** A prepared entry query: which rows to keep, and how many to return. */
 export type EntryQuery = {
   matches: (entry: SessionFileEntry) => boolean;
@@ -51,7 +102,8 @@ function requireLineNo(value: number | undefined, name: string): number | undefi
  * keeps either type and adds no other constraint. An omitted filter constrains nothing, and an
  * array filter is matched against the **returned field**: `ids` and `parentIds` can never select a
  * version 1 row, because its `id` and `parentId` are null, and `messageRoles` can never select a
- * non-message entry, because its `messageRole` is null.
+ * non-message entry, because its `messageRole` is null. `search` reads `text` the same way: it is
+ * the projected body, not the stored line, so a row whose `text` is null is never a hit.
  */
 export function buildEntryQuery(params: SessionEntriesParams): EntryQuery {
   const startLineNo = requireLineNo(params.startLineNo, "startLineNo");
@@ -67,6 +119,8 @@ export function buildEntryQuery(params: SessionEntriesParams): EntryQuery {
 
   const { ids, parentIds, types, messageRoles } = params;
 
+  const search = requireSearch(params.search);
+
   const matches = (entry: SessionFileEntry): boolean => {
     if (startLineNo !== undefined && entry.lineNo < startLineNo) return false;
     if (endLineNo !== undefined && entry.lineNo > endLineNo) return false;
@@ -81,7 +135,12 @@ export function buildEntryQuery(params: SessionEntriesParams): EntryQuery {
 
     // Every row that reached a filter has a timestamp `parseSessionInstant` already accepted, so
     // the fallback is a type obligation rather than a reachable value.
-    return withinWindow(window, parseSessionInstant(entry.timestamp) ?? 0);
+    if (!withinWindow(window, parseSessionInstant(entry.timestamp) ?? 0)) return false;
+
+    // The text search runs last because it is the only filter that reads a field as large as the row
+    // — measured mean 2.1 KB and max 51 KB of `text` — so every cheap exact test has already dropped
+    // what it could before a row is folded and scanned.
+    return search === undefined || search(entry.text);
   };
 
   return { matches, limit: requireLimit(params.limit) };

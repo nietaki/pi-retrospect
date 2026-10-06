@@ -297,8 +297,9 @@ human-readable body when it has one, projected from that line. It is the step af
 that operation names transcript files, this one opens one.
 
 Optional parameters filter the rows — a line range, id and parent sets, entry types, message roles,
-a timestamp window, and a cap. They narrow what is **returned**, never what is **read**: the file is
-still scanned to its last line, so `warnings` describe the whole file whatever the parameters say.
+a literal search over `text`, a timestamp window, and a cap. They narrow what is **returned**, never
+what is **read**: the file is still scanned to its last line, so `warnings` describe the whole file
+whatever the parameters say.
 
 It is a **reader of stored history**, not a view of a conversation. It applies no compaction, no
 `context_edit` replacement, and no branch selection, and it never migrates anything — see
@@ -332,6 +333,7 @@ const { entries, warnings } = await tools.session_entries({ sessionPath });
 | `endTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive upper bound on each entry's own timestamp. |
 | `types` | non-empty `string[]` | unfiltered | Keep entries whose `type` is one of these. |
 | `messageRoles` | non-empty `string[]` | unfiltered | Keep message entries whose role is one of these. |
+| `search` | `{ terms: string[], caseSensitive?: boolean }` | unfiltered | Keep entries whose `text` contains any term as a literal substring. Case-insensitive unless `caseSensitive: true`. |
 | `limit` | integer ≥ 1 | none | Maximum entries returned, applied after filtering. |
 
 ### Filters
@@ -340,33 +342,70 @@ const { entries, warnings } = await tools.session_entries({ sessionPath });
    `{ types: ["message", "compaction"], messageRoles: ["user"] }` keeps user messages and no
    compaction row: the array offers alternatives, the categories stack. A parameter that is absent
    constrains nothing, and `{}` still means "every entry in the file".
-2. **Matching is exact and case-sensitive**, on the returned field rather than on `raw`. There is no
-   substring, no glob, and no fold: `ids: ["u"]` selects nothing, `types: ["Message"]` selects
-   nothing, and a type this package has never seen is selectable only by naming it exactly.
-3. **A null never matches.** `ids` and `parentIds` read the citable `id` / `parentId`, so a version 1
+2. **Exact matching is case-sensitive**, on the returned field rather than on `raw`. For the set
+   filters — `ids`, `parentIds`, `types`, `messageRoles` — there is no substring, no glob, and no
+   fold: `ids: ["u"]` selects nothing, `types: ["Message"]` selects nothing, and a type this package
+   has never seen is selectable only by naming it exactly. `search` is the one filter that looks inside
+   a field rather than at it, and it has rules of its own.
+3. **`search` is a literal substring test over `text`, and any term is enough.** An entry is kept when
+   its non-null `text` contains **any** term — terms never combine, so asking for two of them is an
+   OR, the same shape as every set filter. A term is bytes, not a pattern: `["h.llo"]` matches only
+   the characters `h.llo`, `["C:\\path"]` (how a codemode script spells `C:\path`) is a Windows
+   path, and there is no tokenization, word boundary, or stemming, so `["the"]` matches inside
+   `"there"`. Folding is
+   `String.prototype.toLowerCase` of both sides — Unicode-simple and locale-independent, so `Ünified`
+   is found by `"ünified"` while an `İ` is not folded the way Turkish collation would fold it — and
+   `caseSensitive: true` asks for the case exactly as written. Search is its own category, so
+   `{ search: { terms: ["hello"] }, messageRoles: ["assistant"] }` keeps the assistant rows that
+   mention hello and nothing else.
+4. **A null never matches.** `ids` and `parentIds` read the citable `id` / `parentId`, so a version 1
    file — where both are `null` even when the line stores values — is never selected, and a root entry
    is not selected by any `parentIds` value. `messageRoles` reads `messageRole`, which is `null` for
    every non-message row, so no role string reaches a `model_change` entry even if it is spelled the
-   same way.
-4. **Bounds are inclusive on both ends**, for lines and for timestamps. `startLineNo: 1` and
+   same way. `search` reads `text`, and a row whose `text` is null is never a hit whatever its `raw`
+   holds — see "What `search` reaches" below.
+5. **Bounds are inclusive on both ends**, for lines and for timestamps. `startLineNo: 1` and
    `startLineNo: 2` are the same query: line 1 is the header and can never be a row.
-5. **Timestamps mean what `list_sessions` timestamps mean** — one shared grammar in `filters.ts` and
+6. **Timestamps mean what `list_sessions` timestamps mean** — one shared grammar in `filters.ts` and
    `timestamps.ts`. A bare date names a whole local day, so a date-only `endTimestamp` covers that day
    to its last millisecond; a date-time with no offset is read in the host timezone. Pi writes entry
    timestamps as UTC `Z` strings, so the zone can only ever move a bound, never a stored instant.
    The window compares each entry's own `timestamp`, never the header's.
-6. **`limit` is an output cap, not an I/O bound** — the same rule `list_sessions` states for its own
+7. **`limit` is an output cap, not an I/O bound** — the same rule `list_sessions` states for its own
    `limit`. Rows past the cap are dropped and their `raw` is not retained, which is what makes a
    filtered read of a large session affordable; the scan still runs to the end of the file, because a
    truncated scan would silently truncate `warnings` too.
-7. **A filtered row is not a skipped row.** It costs no warning: `warnings` accounts for lines that
+8. **A filtered row is not a skipped row.** It costs no warning: `warnings` accounts for lines that
    could not become entries, and filters account for rows that exist and were not asked for.
 
 **Bad parameters are refused before the file is opened**, so a mistake cannot look like a missing
 session, and they are refused by name. Line bounds and `limit` are positive integers; a filter array
-must hold at least one value; a reversed line range (`endLineNo` below `startLineNo`), a reversed
+must hold at least one value; `search.terms` must hold at least one term and none of them may be
+empty, because an empty term is a substring of every row and `terms: [""]` would read as a working
+filter while returning everything; a reversed line range (`endLineNo` below `startLineNo`), a reversed
 timestamp window, and a timestamp the shape gate refuses all throw. Because the check runs before any
 path resolution, a bad filter outranks a confinement failure or a missing file.
+
+Pi validates the declared schema before `execute()` runs, and it **coerces** toward the declared type
+first (verified 2026-10-06 against the live store). So one declared-string shape and one boolean shape
+are forgiving in a way the caller should know:
+
+| Sent | What the tool sees | Effect |
+| --- | --- | --- |
+| `search: { terms: "timeout" }` | `terms: ["timeout"]` | a bare string becomes a one-term set; it does not fail |
+| `search: { terms: "" }` | `terms: [""]` | refused — the item's `minLength` still applies after coercion |
+| `search: { terms: 7 }` | `terms: ["7"]` | coerced to the string `"7"` and searched as those bytes |
+| `search: { terms: null }` | `terms: ["null"]` | coerced to the string `"null"`, **not** treated as absent |
+| `search: { terms: [] }` | — | refused: `must not have fewer than 1 items` |
+| `caseSensitive: "true"` / `1` / `0` | `true` / `true` / `false` | coerced to a boolean |
+| `caseSensitive: "yes"` | — | refused: `must be boolean` |
+| `search: "timeout"` | — | refused: `must be object` |
+| `search: { terms: ["x"], regex: "y" }` | — | refused: `additionalProperties` is false |
+
+`search: { terms: null }` is the one to watch: a caller who means "no search" and writes `null` gets a
+search for the four characters `null` rather than an unfiltered read. Absence is what constrains
+nothing — omit `search` instead of nulling it. `readSessionEntries` also guards these shapes itself,
+because it is the library surface and a script calling it directly meets no validator on the way in.
 
 **Ordering is not a parameter.** Rows return in physical file order — write order, not time order —
 whatever the filters, so a filtered read is always a contiguous slice of the transcript's own order.
@@ -450,6 +489,21 @@ The head of a huge transcript, cheaply: `limit` drops the rows it cannot keep, s
 const { entries, warnings } = await tools.session_entries({ sessionPath, limit: 200 });
 
 return { count: entries.length, firstLine: entries[0]?.lineNo, warnings };
+```
+
+Finding the rows that talk about one thing, without reading the file: `search` is a literal substring
+test over `text`, any term is enough, and it is case-insensitive unless `caseSensitive: true`. Pair it
+with `messageRoles` so the prompt rows — whose `text` is a rendered system prompt — are not matched at
+all.
+
+```js
+const { entries } = await tools.session_entries({
+  sessionPath,
+  search: { terms: ["ETIMEDOUT", "connection timed out"] },
+  messageRoles: ["user", "assistant", "toolResult"],
+});
+
+return entries.map((e) => ({ lineNo: e.lineNo, role: e.messageRole, said: e.text?.slice(0, 200) }));
 ```
 
 Counting entry types across a session, keeping `raw` inside the script:
@@ -639,6 +693,41 @@ the 168 parent rows in the live store). Folded as above over the same store, 118
 sessions hold a system row, every one of them agrees with Pi's `getCurrentSystemPrompt`, and 3 lead
 with such a loadout-only row.
 
+### What `search` reaches
+
+`search` runs over `text` and nothing else, so its scope is exactly the projection table above: the
+prose of `user`, visible `assistant`, `toolResult`, and `custom` messages, a `system` message's
+rendered prompt, `custom_message` content, `compaction` and `branch_summary` summaries, a
+`context_edit` replacement, a `session_info` name, a `usage` note, a `label`, and the command of a
+`bashExecution` row. Terms match across the newlines the projection joins, so `["Hello\nthere"]` finds
+the row whose two text blocks became `"Hello\nthere"`.
+
+What it cannot reach, and why each exclusion is the same one `text` already makes:
+
+- **Assistant thinking**, tool-call `arguments`, images, and every other non-text block. Thinking is
+  natural language and would be findable, but it is how the model got there rather than what it said,
+  and in the live store most assistant rows carry thinking and no visible text at all — searching it
+  by default would drown the hits in reasoning. A caller that wants it filters
+  `raw.message.content` for `type: "thinking"` blocks in its own script.
+- **The output of a `!` shell run.** A `bashExecution` row projects its `command`, so a search finds
+  the command that produced an output but not a string that appeared only inside that output; the
+  bytes are in `raw.message.output`.
+- **Any field of a state-only entry.** A `model_change` row is never a hit for the word `provider`
+  however often that key appears in its `raw`, because the row has no `text` and a null `text` matches
+  nothing. The same holds for a `custom` entry's extension `data`.
+
+Two consequences a caller has to hold:
+
+- **Prompt text is in scope.** A `system` row's `text` is that message's rendered prompt — the
+  preamble, the tool rules, every `AGENTS.md` under `<project_context>`, the skill descriptions — so
+  an ordinary English term matches the harness, not the conversation: measured over 155 parent
+  sessions in the live store that is about 2.7 MB of prompt text. Narrow the search with `types` or
+  `messageRoles` when the question is about what was said, e.g. `messageRoles: ["user", "assistant",
+  "toolResult"]`, which excludes the prompt rows and the `session_info` and `usage` rows with them.
+- **Search is a scan, not an index.** There is no index and no corpus to search across files, so a
+  `search` read costs the same walk as an unfiltered one and returns the rows it kept. Ranking,
+  match counts, and per-hit excerpts are not features of this parameter — see Limitations.
+
 ### What this is not
 
 - **Not the model's context.** No compaction summary replaces older entries, no `context_edit`
@@ -687,9 +776,15 @@ with such a loadout-only row.
   megabytes, because there is no per-row budget. Filter and project inside a script; never return
   `entries` to a model, and never print `raw`.
 - **Filters do not shorten the scan.** There is a line range, a timestamp window, entry-type and role
-  sets, and a row cap, but the reader still walks every line of the file — it must, to keep
-  `warnings` whole-file. So a `limit: 1` read of a 2.4 MB session costs the same parse as a full one
-  and returns a fraction of the rows. There is no byte budget and no early-exit hint.
+  sets, a literal `text` search, and a row cap, but the reader still walks every line of the file — it
+  must, to keep `warnings` whole-file. So a `limit: 1` read of a 2.4 MB session costs the same parse as
+  a full one and returns a fraction of the rows, and a `search` read costs that parse plus a case fold
+  and a substring test per row that reached it. There is no index, no byte budget, and no early-exit
+  hint.
+- **`search` has no ranking, no excerpts, and no field paths.** It is a boolean per row: kept or
+  dropped. A hit returns the whole row, `text` and `raw` included, so the caller projects what it
+  wants to show; there is no match offset, no snippet, no score, and no relevance order. Rows come
+  back in file order whatever the terms are.
 - **`lineNo` is the only durable handle here, and it is durable only while the file is.** Pi appends
   and `createBranchedSession` writes new files, so a line number is a citation into a snapshot, not
   a permanent address. `id` is the stable handle for a v2+ file; in a version 1 file it is `null`

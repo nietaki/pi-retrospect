@@ -64,6 +64,7 @@ export const SessionEntriesParamsSchema = Type.Object(
     endTimestamp: Type.Optional(Type.String()),
     types: Type.Optional(ValueSet(/* … */)),
     messageRoles: Type.Optional(ValueSet(/* … */)),
+    search: Type.Optional(SearchFilter), // `{ terms: ValueSet(/* … */), caseSensitive?: boolean }`
     limit: Type.Optional(Type.Integer({ minimum: 1 })),
   },
   { additionalProperties: false },
@@ -246,6 +247,26 @@ the caller's mistake and must outrank both a confinement failure and a missing f
 projection lives on its own in `src/entry-text.ts`: it is a pure function of the parsed line, so every
 mapping rule is testable without a file, and the reader cannot accidentally make a row's *shape*
 depend on whether it had text.
+
+`search` is compiled by `requireSearch` in `src/entry-query.ts`, beside the other entry filters,
+because it is a filter over a returned field and not a second projection: it validates the term set,
+folds the terms **once** per call rather than once per row, and returns a predicate over `text`. It is
+the only filter that is not exact, which is why the terms of a `search` and the values of an `ids` set
+are allowed to mean different things about case. Keeping the fold in the query layer is also what
+keeps the empty-term refusal on the same footing as the line and timestamp bounds: all of them throw
+before any file is opened.
+
+Pi validates the parameter schema with Ajv *before* `execute()` and coerces toward the declared type on
+the way (verified 2026-10-06 on the live store): a scalar where an array is declared becomes a
+one-item array, and `null` becomes the string `"null"` rather than an absent value. So
+`requireSearch`'s own `Array.isArray` and per-term `typeof` guards are unreachable through the tool —
+the validator has already shaped the value — and exist for `readSessionEntries` as the library entry
+point, which no validator sits in front of. `test/session-entries-filters.test.ts` reaches them that
+way: through the library surface, with a term set that is not an array. What the validator does *not*
+undo is `minItems` and `minLength`, so both refusals still land on the tool path, and the
+coercion means a caller who writes `search: { terms: null }` searches for `null` instead of turning
+search off. That is a documented sharp edge, not a guard to add: absence is spelled by omitting the
+parameter, and the schema cannot tell a coerced `null` from a term the caller meant.
 
 **Filters narrow the result, never the scan.** The loop builds every row `toEntry` accepts and then
 drops the ones `query.matches` rejects or `query.limit` has already filled, so a filtered row costs
@@ -510,7 +531,10 @@ returned, that `raw` is the whole line and can be megabytes, that `text` is a pr
 copy of it and what it deliberately leaves out, that entries arrive in file order with
 every branch included and order is not configurable, that filters are ANDed with OR inside one array
 and match the returned field exactly, that a `null` field matches no array value, that warnings
-describe the whole file whatever the filters say, and that version 1 rows come back with null ids.
+describe the whole file whatever the filters say, and that version 1 rows come back with null ids. For
+`search` it must also say what the field cannot reach (`raw`, so thinking, tool calls, images, and a
+bash run's output), that a null `text` is never a hit, and that a `system` row's `text` is a rendered
+prompt — the hits a caller does not expect from a word like "tool".
 
 The registered `description` must keep telling the caller what it cannot infer from the
 shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
@@ -633,9 +657,10 @@ rule on its own, including a `null` removal marker and a patch row; and a descri
 the `system` projection against `getSystemMessageText` from `@earendil-works/pi-ai` on well-formed
 messages, so the mirror cannot drift silently and neither `raw` nor a live store is needed to catch it),
 `test/session-entries-filters.test.ts` (every filter parameter: inclusive line bounds, exact and
-case-sensitive sets, null fields that match nothing, the shared timestamp window, a `limit` that
-does not shorten the scan, AND across categories with OR inside one array, and pagination by
-`startLineNo`), and
+case-sensitive sets, null fields that match nothing, the literal `search` over `text` with its
+case-insensitive default and its case-sensitive opt-in and its refusal of an empty term set, the shared
+timestamp window, a `limit` that does not shorten the scan, AND across categories with OR inside one
+array, and pagination by `startLineNo`), and
 `test/session-entries-tool.test.ts` (registration shape, the filter parameter declarations, open
 `raw` subschema, the required nullable `text` declaration, structured output equality, filters passed
 through `execute`, rendered rows, entry
@@ -679,6 +704,7 @@ Pi replaces on migration; every returned row has a real `type` and a validated `
 unknown types, unknown roles, and unknown fields pass through `raw` untouched; one skipped line
 produces exactly one warning; and **the filters cannot change either the numbering or the warning
 set** — they select rows from the read the reader already made, so a line bound, a set filter, a
+text search, a
 timestamp window, and a `limit` all read the same file and report the same skips.
 
 ---
@@ -706,22 +732,37 @@ timestamp window, and a `limit` all read the same file and report the same skips
   to check the synthetic layout against reality. Do not commit the output.
 - **Remaining filter parameters.** Time range, `cwd`, ordering, and a row cap exist now. For
   `session_entries` the line range, `ids`, `parentIds`, `types`, `messageRoles`, the timestamp
-  window, and `limit` exist now. Still deferred: by presence or count of subagents, `includeCurrentSession`
+  window, a literal `search` over `text`, and `limit` exist now. Still deferred: by presence or count
+  of subagents, `includeCurrentSession`
   (the currently running session is included today; an exclusion parameter is the agreed future
   direction, most likely `excludePaths`), and a depth limit for `subagentSessions`. Entry-level
-  searches over `raw` — text, substrings, a field path — are deliberately absent: they would need an
-  index to be worth the scan, and none exists.
-- **Decide the search surface over `text`.** `text` now gives every row one canonical string, so a
-  search has something to run over without re-walking content blocks per role. Undecided: whether it
-  filters inside this reader (a substring or regex parameter, whole-file scan, no index) or belongs to
-  a separate operation with an index; whether it covers `text` only; and how thinking is reached if it
-  is ever searched at all — a separate opt-in field or search scope, never folded into `text`, which is
-  what keeps "what the model said" separable from "how it got there" and stops reasoning from drowning
-  the hits (4,378 of 6,867 assistant rows in the live store have thinking and no visible text).
-  Now that `system` rows project their prompt too, a search over `text` also matches harness text —
-  the preamble, the tool rules, every `AGENTS.md` under `<project_context>`, and skill descriptions —
-  about 2.7 MB of it across 155 parent sessions. A search default has to decide
-  whether prompt rows are in scope or excluded by role.
+  searches over `raw` — a field path, a JSON shape, thinking, tool-call arguments — are deliberately
+  absent: they would need an index to be worth the scan, and none exists.
+- **The search surface over `text` is decided; its extensions are not.** Chosen 2026-10-06: literal
+  substrings over `text`, any-term OR, case-insensitive by default with `caseSensitive: true` as the
+  opt-in, inside this reader, with no index. Regex was rejected as the *only* interface — escaping cost
+  in a codemode string, ambiguous flags if pattern and flags share one field, pathological backtracking
+  on a 50 KB row, and the common query is a name or an error fragment — and a textual DSL (Google-like
+  or Lucene-like) was rejected because a parser, precedence, and escaping rules buy nothing an agent
+  cannot spell in JSON. Deferred, in order of likely need:
+  - **A pattern filter**, if literal terms keep failing to express boundaries or alternatives. The
+    shape under discussion is a separate `textRegex: { pattern, flags }` object using ECMAScript
+    semantics, with `g`/`y` refused because `lastIndex` makes a repeated `.test()` stateful, compiled
+    before the file is opened like every other parameter. It stays its own category rather than
+    overloading `search` strings with implicit regex.
+  - **Reaching thinking.** Decided once already, and the decision holds: thinking is never folded into
+    `text` (4,378 of 6,867 assistant rows in the live store have thinking and no visible text, so
+    folding it would make `text` mostly reasoning) and is therefore unreachable from `search`. If
+    searching it is ever wanted it needs its own opt-in field or scope, not a default.
+  - **Ranked, indexed, or multi-file search.** This is a boolean per row over one file. Match counts,
+    excerpts, offsets, and a score are not on offer, and a `search` costs the same walk as an
+    unfiltered read; the index question belongs to a separate operation, decided against measurements
+    of a store that would need one.
+  - **Prompt rows.** `text` search matches a `system` row's rendered prompt — the preamble, tool
+    rules, every `AGENTS.md`, skill descriptions, about 2.7 MB across 155 parent sessions — and the
+    answer taken is "in scope, and the caller narrows with `types`/`messageRoles`" rather than a
+    default exclusion. If prompt hits turn out to dominate real searches, revisit that instead of
+    adding a scope parameter to `search`.
 - **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
   (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for
   this project" rather than like a mistake. Two ways out, not chosen yet: reject a

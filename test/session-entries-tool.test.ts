@@ -94,6 +94,7 @@ describe("session_entries tool registration", () => {
       "endTimestamp",
       "types",
       "messageRoles",
+      "search",
       "limit",
     ]);
     expect(tool.parameters.required).toStrictEqual(["sessionPath"]);
@@ -128,6 +129,35 @@ describe("session_entries tool registration", () => {
     expect(properties).not.toHaveProperty("sortDirection");
   });
 
+  it("declares search as a literal substring filter over text, with an optional case flag", () => {
+    const search = tool.parameters.properties.search as {
+      type: string;
+      required: string[];
+      additionalProperties: boolean;
+      description: string;
+      properties: {
+        terms: { type: string; minItems: number; items: { type: string; minLength: number } };
+        caseSensitive: { type: string; default: boolean };
+      };
+    };
+
+    expect(search.type).toBe("object");
+    expect(search.additionalProperties, "a search holds terms and a case flag and nothing else").toBe(false);
+    expect(search.required).toStrictEqual(["terms"]);
+    expect(search.description).toMatch(/literal/i);
+
+    // Terms follow the same set rules as the exact filters: non-empty array of non-empty strings.
+    expect(search.properties.terms.type).toBe("array");
+    expect(search.properties.terms.minItems, "an empty term set is refused, not read as every row").toBe(1);
+    expect(search.properties.terms.items.type).toBe("string");
+    expect(search.properties.terms.items.minLength, "an empty term would match every row").toBe(1);
+
+    // Case-insensitive is the default, and the schema says so rather than leaving it to prose.
+    expect(search.properties.caseSensitive.type).toBe("boolean");
+    expect(search.properties.caseSensitive.default).toBe(false);
+    expect(search.required, "caseSensitive stays optional").not.toContain("caseSensitive");
+  });
+
   it("keeps raw an open object so any entry shape passes validation", () => {
     const entrySchema = (tool.outputSchema as {
       properties: { entries: { items: { properties: Record<string, { additionalProperties?: boolean }> } } };
@@ -156,6 +186,16 @@ describe("session_entries tool registration", () => {
     expect(tool.description).toContain("ANDed");
     expect(tool.description).toContain("startLineNo");
     expect(tool.description).toContain("warnings describe the whole file");
+  });
+
+  it("describes what search matches and what it cannot reach", () => {
+    expect(tool.description).toContain("search");
+    expect(tool.description).toMatch(/literal substring/i);
+    expect(tool.description).toMatch(/caseInsensitive|folds case/i);
+    expect(tool.description).toMatch(/never `raw`|not `raw`/i);
+    expect(tool.description).toMatch(/`text` is null|non-null `text`/i);
+    // The prompt rows are the surprising hits: a `system` row's text is its rendered prompt.
+    expect(tool.description).toMatch(/rendered prompt/i);
   });
 
   it("names the text projection and what it leaves out", () => {
@@ -196,6 +236,40 @@ describe("session_entries tool execution", () => {
       structured(result).entries.map((row) => row.lineNo),
       "the fixture holds one message row and one model_change row",
     ).toStrictEqual([2]);
+
+    // A search reaches the reader through the same door as the exact filters, and a `model_change`
+    // row is never a hit even when the word lives in its `raw`, because only `text` is searched.
+    const searched = await tool.execute(
+      "call-7",
+      { sessionPath: SESSION, search: { terms: ["hellO"] } },
+      undefined,
+      undefined,
+      NO_CONTEXT,
+    );
+
+    expect(structured(searched).entries.map((row) => row.lineNo)).toStrictEqual([2]);
+
+    const exact = await tool.execute(
+      "call-8",
+      { sessionPath: SESSION, search: { terms: ["hellO"], caseSensitive: true } },
+      undefined,
+      undefined,
+      NO_CONTEXT,
+    );
+
+    expect(structured(exact).entries).toStrictEqual([]);
+
+    // A row dropped by the search still leaves the whole-file scan and its warnings intact.
+    const provider = await tool.execute(
+      "call-9",
+      { sessionPath: SESSION, search: { terms: ["provider"] } },
+      undefined,
+      undefined,
+      NO_CONTEXT,
+    );
+
+    expect(structured(provider).entries).toStrictEqual([]);
+    expect(structured(provider).warnings).toStrictEqual([]);
 
     // A bound that excludes the only matching row is an empty result, not an error.
     const outside = await tool.execute(
