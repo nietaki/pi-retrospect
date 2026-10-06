@@ -32,11 +32,15 @@
   "files": [
     "src",
     "docs",
+    "skills",
     "README.md"
   ],
   "pi": {
     "extensions": [
       "./src/index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

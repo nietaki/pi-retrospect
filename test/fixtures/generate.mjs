@@ -6,7 +6,7 @@
  * The tree reproduces Pi's real layout — `--<slug>--` project directories, parent
  * `<stem>.jsonl` files, `<stem>/<launch-uuid>/run-<n>/session.jsonl` subagent transcripts —
  * plus one deliberately broken file per warning branch. Headers are hand-written; no real
- * session data lives here. See docs/tool-api.md (Testing policy).
+ * session data lives here. See docs/maintainer-reference.md (Testing policy).
  */
 
 import { mkdir, rm, symlink, writeFile } from "node:fs/promises";

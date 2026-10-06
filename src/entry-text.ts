@@ -20,9 +20,9 @@
  * - **State fields.** `provider`, `modelId`, `thinkingLevel`, and a `custom` entry's `data` are real
  *   values with no text form. Serializing them would make `text` a second, worse copy of `raw`.
  * - **A system message's tool loadout.** `toolsAdded` and `toolsRemoved` are tool schemas and name
- *   references, and they are the bulk of a system row: measured 2026-10-06 (see docs/tool-api.md), a
- *   rendered system message is about a third of its own `raw` bytes precisely because the loadout is
- *   the other two-thirds. Prose in, schemas out.
+ *   references, and they are the bulk of a system row: measured 2026-10-06, a rendered system
+ *   message is about a third of its own `raw` bytes precisely because the loadout is the other
+ *   two-thirds. Prose in, schemas out.
  * - **`bashExecution.output`.** The entry's initiating content is the command; the output can be
  *   hundreds of kilobytes and already lives in `raw`.
  *
@@ -78,9 +78,8 @@ const CONTENT_ROLES = new Set(["user", "assistant", "toolResult", "custom"]);
  * This mirrors `getSystemMessageText` in `@earendil-works/pi-ai` (`dist/utils/text.js`), which is how
  * Pi itself defines the text of one system message — so it is a projection of a stored shape, not an
  * invented rendering. Two stored facts make the mirror necessary rather than optional, both measured
- * 2026-10-06 over every session in the author's store, subagent transcripts included: 214 files, 227
- * system rows. docs/tool-api.md quotes the parent-only store — 155 files, 168 rows — so the two counts
- * differ by basis and not by disagreement:
+ * 2026-10-06 over every session in the author's store, subagent transcripts included: 214 files and
+ * 227 system rows:
  *
  * - `content` is `""` in **all 227** rows. Pi's `buildSystemPromptState` returns `{ content: "",
  *   sections }` for every prompt it builds normally, and puts prose in `content` only for a forced,
