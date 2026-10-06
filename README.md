@@ -78,11 +78,12 @@ session running without codemode.
 
 **`session_entries`** takes `sessionPath` plus optional filters, and returns the entries of that file:
 `{ lineNo, id, parentId, timestamp, type, messageRole, text, raw }`, where `raw` is the whole parsed JSON
-line unchanged and `text` is the entry's primary human-readable body — a message's content, a
-compaction or branch summary, a `custom_message` content, a `context_edit` replacement, a
-`session_info` name, a usage note, a label, or the command of a `!` shell run — or `null` when the
-entry has no such payload. Assistant thinking, tool calls, and images never reach `text`; they are
-still in `raw`. Line 1 is the session header and is never returned, so `lineNo` starts at 2 and a
+line unchanged and `text` is the entry's primary human-readable body — a message's content, a system
+message's content plus its prompt sections, a compaction or branch summary, a `custom_message` content,
+a `context_edit` replacement, a `session_info` name, a usage note, a label, or the command of a `!`
+shell run — or `null` when the entry has no such payload. Assistant thinking, tool calls, and images
+never reach `text`; they are still in `raw`. Line 1 is the session header and is never returned, so
+`lineNo` starts at 2 and a
 malformed line costs a warning without shifting the lines after it. Unknown entry types and unknown
 message roles come back verbatim, and the call cannot leave the sessions root — a relative path, a
 `..` traversal, a symlink that resolves outside it, and a file whose first line is not a session
@@ -118,10 +119,14 @@ return entries.map((entry) => ({
 ```
 
 `raw` is unbounded per row — as large as the entries it keeps (a 2.4 MB session returned 2.46 MB of
-`raw`) — and `text` is bounded only by the entry it was projected from (measured max 51 KB), so it is
-a codemode-only tool by design. It reads stored history: no compaction, no
-`context_edit`, no branch selection is applied, so it is not the model's context view. In a session
-file older than version 2, `id` and `parentId` come back `null` even where the line stores them — Pi
+`raw`) — and `text` is bounded only by the entry it was projected from (measured max 51 KB on a tool
+result), so it is a codemode-only tool by design. A `system` row is the largest category `text` carries
+by mean (16.7 KB, max 38.3 KB): it projects that message's rendered prompt, which is one message's own
+state — a session folds several such rows to get the prompt the model actually had.
+
+It reads stored history: no compaction, no `context_edit`, no branch selection is applied, so it is not
+the model's context view. In a session file older than version 2, `id` and `parentId` come back `null`
+even where the line stores them — Pi
 replaces every id when it migrates such a file — and one `legacy_version` warning says so; `lineNo`
 is the handle that stays valid, and `raw` keeps what was written.
 

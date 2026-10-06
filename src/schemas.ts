@@ -158,6 +158,8 @@ export const JsonObjectSchema = Type.Unsafe<JsonObject>({
  *
  * `text` is a projection of the entry's primary human-readable body (see `entry-text.ts`), never a
  * serialization of `raw`: null when the entry has no textual payload or that payload holds no text.
+ * A `system` message is the one role whose body is split across two fields — Pi persists `content`
+ * empty and the prompt in `sections` — so its projection joins them, as Pi's own renderer does.
  */
 export const SessionFileEntrySchema = Type.Object(
   {
@@ -176,7 +178,7 @@ export const SessionFileEntrySchema = Type.Object(
     }),
     messageRole: NullableString('Message role of a "message" entry, else null'),
     text: NullableString(
-      "Primary human-readable text projected from the entry: message content (user, assistant visible text, tool result, system, custom), a custom_message content, a compaction or branch_summary summary, a context_edit replacement, a session_info name, a usage note, a label, or a bashExecution command. Null when the entry has no such payload, and for assistant thinking, tool calls, and images.",
+      "Primary human-readable text projected from the entry: message content (user, assistant visible text, tool result, custom), a system message's content followed by its prompt sections in stored order, a custom_message content, a compaction or branch_summary summary, a context_edit replacement, a session_info name, a usage note, a label, or a bashExecution command. Null when the entry has no such payload, and for assistant thinking, tool calls, and images.",
     ),
     raw: JsonObjectSchema,
   },

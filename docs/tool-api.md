@@ -514,12 +514,15 @@ dropped from it.
 ### The `text` projection
 
 `text` answers the question a caller would otherwise ask `raw` about: what did this entry actually
-say. It is **one field per entry that already has a text form in the stored data** — never a
-serialization of `raw`, and never a rendering of a field that has no text form.
+say. It is **the entry's stored prose, taken from the field that carries it** — never a serialization
+of `raw`, and never a rendering of a field that has no text form. One role needs two fields: Pi
+persists a system message with an empty `content` and its prompt in `sections`, so that role joins them
+the way Pi's own renderer does (see below).
 
 | Entry | Source |
 | --- | --- |
-| `message` / `user`, `system`, `toolResult`, `custom` | `message.content` |
+| `message` / `user`, `toolResult`, `custom` | `message.content` |
+| `message` / `system` | `message.content`, then every non-`null` `message.sections` value, in stored order, joined with `"\n\n"` — **not** `toolsAdded` or `toolsRemoved` |
 | `message` / `assistant` | the `type: "text"` blocks of `message.content` — **not** thinking, tool calls, or images |
 | `message` / `bashExecution` | `message.command` only |
 | `message` / `branchSummary`, `compactionSummary` | `message.summary` |
@@ -541,6 +544,29 @@ The rules that hold across the table:
   the model's reasoning rather than what it said, and measured on one store it *outlines* visible
   text: two of every three assistant rows carry thinking and no visible text at all, so folding it in
   would make `text` mostly reasoning. It stays in `raw.message.content`, reachable per block type.
+- **A system message contributes its content *and* its sections.** `content` alone projected nothing:
+  measured 2026-10-06 over the author's store, **all 168 parent-session system rows persisted
+  `content: ""`**, because `buildSystemPromptState` in `@earendil-works/pi-coding-agent` returns
+  `{ content: "", sections }` for every prompt it builds normally and puts prose in `content` only for a
+  forced, section-less prompt. The rule is `getSystemMessageText` in `@earendil-works/pi-ai` — content,
+  then every non-`null` section value in stored order, joined with `"\n\n"` — so this is Pi's own
+  definition of a system message's text, not an invented rendering. Nothing needs re-wrapping either:
+  `buildSystemPromptSections` stores each value already tag-wrapped (`"<tools>\n…\n</tools>"`, with only
+  `preamble` untagged), so the join reproduces the prompt verbatim.
+  Three consequences a caller has to hold:
+  - The result is **one message's own rendered state**, not the session's effective prompt. The first
+    system row that names sections declares the whole set; later rows patch by name — 28 of the 155
+    parent sessions hold more than one system row, and their later rows carry e.g. `{ skills }` alone —
+    so the text of a patch row is the new block. Folding a sequence into the prompt the model ended up
+    with is a replay over `sections` by name, which no row here performs (the recipe is below).
+  - A section value of `null` is a removal marker and contributes nothing: 0 of the 168 rows used one at
+    measurement time, but `SystemMessage.sections` is typed `Record<string, string | null>` and Pi's
+    renderer skips nulls, so this does too.
+  - The **tool loadout stays out**: `toolsAdded` carries complete JSON Schemas, which is why a rendered
+    system message is only about a third of its own `raw` bytes.
+  Stored order is followed, not canonicalized, and JSON reorders integer-like keys — Pi warns about that
+  in the `SystemMessage.sections` docstring — so a section named `2026` would lead. It is the same order
+  Pi's renderer sees, so the two still agree.
 - **No rendering of state.** A `model_change` has a provider and a model id, and a `custom` entry has
   extension `data` that may be a string by coincidence. Turning either into text would invent a
   presentation and put it in the data layer.
@@ -549,19 +575,21 @@ The rules that hold across the table:
   row — it is a `string | null`, like `id`, `parentId`, and `messageRole`, not an optional key.
 - **Nothing is trimmed or truncated.** Pi's bytes survive: `"  keep the padding \n"` comes back with
   its padding. `text` is bounded only by the entry it was projected from, so a row can still be large —
-  measured 2026-10-05 over every parent session in the author's store (≈17,000 rows): 63% of rows carry
-  text, mean 1.9 KB, max 51 KB, and a `compaction` summary averages 9.8 KB on its own. `limit` and the
-  filters remain the only bound on a result.
+  measured 2026-10-06 over every parent session in the author's store (155 files, 17,348 rows): 64% of
+  rows carry text, mean 2.1 KB, max 51 KB (a `toolResult`), a `compaction` summary averages 9.8 KB, and
+  a `system` row averages 16.7 KB (max 38.3 KB) — the largest category by mean. The system rule costs
+  little next to `raw`: over 40 sampled sessions its rendered prompts add 0.55 MB to the 15.5 MB a full
+  read already returns, about 3.5%, because two-thirds of a system row's `raw` is tool schemas. And
+  `renderSessionEntriesContent` sends no payloads at all, so none of it reaches a model unless a script
+  puts it there. `limit` and the filters remain the only bound on a result.
 
 Coverage by kind on that same store, as ratios rather than totals (a session store grows daily, so
 re-measure rather than trusting these — see `docs/maintainer-reference.md`): **every** `toolResult`,
 `custom_message`, `compaction`, `session_info`, and `bashExecution` row had text; `user` rows were
 99.5%, the misses carrying content with no text in it; `assistant` rows were about a third, the rest
-thinking and tool calls only. **No** `system` row had any: Pi persists the prompt with an empty
-`content` string and its body in the `sections` map, which is structured state rather than one textual
-payload — so `text` is not a way to read a session's system prompt, and `raw.message.sections` is.
-None of the measured `context_edit` rows carried a replacement either: all of them omitted their
-target, which is the `null` branch.
+thinking and tool calls only; `system` rows were 162 of 168, the misses being rows that carry only
+`toolsAdded`/`toolsRemoved` with neither `content` nor `sections`. None of the measured `context_edit`
+rows carried a replacement either: all of them omitted their target, which is the `null` branch.
 
 The point of the field is that the common read needs no knowledge of Pi's content-block shapes:
 
@@ -572,12 +600,49 @@ const { entries } = await tools.session_entries({ sessionPath, messageRoles: ["u
 return entries.flatMap((e) => (e.text === null ? [] : [{ lineNo: e.lineNo, text: e.text }]));
 ```
 
+Because a system row's `text` is one message's own state, the prompt a session actually ran is a fold
+over its system rows — a caller-side recipe, not something any row here computes. It spells out
+`getCurrentSystemMessage` plus `getSystemMessageText` from `@earendil-works/pi-ai`, so it runs in a
+plain script:
+
+```js
+// the effective system prompt at the end of a session, and what each row changed
+const { entries } = await tools.session_entries({ sessionPath, messageRoles: ["system"] });
+
+const contents = [];
+const sections = new Map(); // patched by name, in first-declared order
+const changes = [];
+
+for (const { raw } of entries) {
+  const message = raw.message;
+  const text =
+    typeof message.content === "string"
+      ? message.content
+      : (message.content ?? []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  if (text !== "") contents.push(text); // later content is appended to the base prompt
+  for (const [name, value] of Object.entries(message.sections ?? {})) {
+    if (value === null) sections.delete(name); // a removal marker
+    else sections.set(name, value); // a later row replaces by name
+  }
+  changes.push({ timestamp: raw.timestamp, names: Object.keys(message.sections ?? {}) });
+}
+
+return { prompt: [...contents, ...sections.values()].join("\n\n"), changes };
+```
+
+One order caveat the fold has to survive: a session can open with a row that only changes the tool
+loadout, which names neither `content` nor `sections`, projects `null`, and contributes nothing (6 of
+the 168 parent rows measured 2026-10-06). Folded as above over the author's store on that date, 118 of
+the 155 parent sessions hold a system row, every one of them agrees with Pi's `getCurrentSystemPrompt`,
+and 3 lead with such a loadout-only row.
+
 ### What this is not
 
 - **Not the model's context.** No compaction summary replaces older entries, no `context_edit`
-  replacement is applied, and the stored leaf and active branch are ignored. `entries` is every line
-  in the file that the filters let through, including abandoned branches and the raw text that an
-  edit later replaced. For "what the model actually saw" you need Pi's
+  replacement is applied, and the stored leaf and active branch are ignored; a `system` row's `text` is
+  that message's own rendered state, not the prompt the model holds after later patch rows. `entries` is
+  every line in the file that the filters let through, including abandoned branches and the raw text
+  that an edit later replaced. For "what the model actually saw" you need Pi's
   `buildContextEntries`/`buildSessionProjection`, which this package does not wrap yet.
 - **Not chronological.** `entries` is in **file order**, which is write order. A session whose leaf
   was moved backwards interleaves branches, and a resumed subagent run appends. Sort by `timestamp`

@@ -320,7 +320,7 @@ difference, and it is the accepted rule above, not an accident.
 | `id` | non-empty string **and** a header `version` of at least 2, else `null`. Never rejects a line |
 | `parentId` | same rule as `id`: non-empty string in a v2+ file, else `null` (a root, an absent field, or a non-string all read as null) |
 | `messageRole` | the `message.role` string when `type === "message"`, else `null` |
-| `text` | `entryText(raw)` from `src/entry-text.ts` — the entry's primary human-readable body, or `null`; never a rejection reason, since a row with no text is still a row |
+| `text` | `entryText(raw)` from `src/entry-text.ts` — the entry's primary human-readable body, or `null`; never a rejection reason, since a row with no text is still a row. The `system` role is the one case that reads two fields (`message.content`, then the non-`null` values of `message.sections`), because Pi stores the prompt in the sections map with `content: ""` |
 | `raw` | the parsed line, cast to `JsonObject` — safe by construction, it came from `JSON.parse` |
 
 `id` and `parentId` cannot be acceptance criteria — a missing one is a null, not a rejected row — and
@@ -553,7 +553,8 @@ Warnings (2)
 `session_entries` renders an index of lines and never a payload — one `lineNo type role id` bullet
 per row, with `raw` left out entirely because a single entry can exceed the context window, and
 `text` left out for the same reason in miniature: it is bounded only by the entry it came from
-(measured max 51 KB), so a row's rendered length must not depend on its payload:
+(measured max 51 KB, and a `system` row averages 16.7 KB), so a row's rendered length must not depend
+on its payload:
 
 ```
 Entries (2)
@@ -625,8 +626,11 @@ parent/child trees for spot-checks — see TODOs.
 `session_entries` is covered by `test/session-entries.test.ts` (confinement, header rules, physical
 line numbers, arbitrary `raw`, the three warning codes, v1 nulls, abort),
 `test/entry-text.test.ts` (the whole `text` mapping: each qualifying type and role, the content-array
-join, what is excluded — thinking, tool calls, images, a bash execution's output, state-only and
-unknown kinds — and the null-instead-of-empty-string rule),
+join, what is excluded — thinking, tool calls, images, a bash execution's output, a system message's
+tool loadout, state-only and unknown kinds — and the null-instead-of-empty-string rule; the `system`
+rule on its own, including a `null` removal marker and a patch row; and a describe block that pins
+the `system` projection against `getSystemMessageText` from `@earendil-works/pi-ai` on well-formed
+messages, so the mirror cannot drift silently and neither `raw` nor a live store is needed to catch it),
 `test/session-entries-filters.test.ts` (every filter parameter: inclusive line bounds, exact and
 case-sensitive sets, null fields that match nothing, the shared timestamp window, a `limit` that
 does not shorten the scan, AND across categories with OR inside one array, and pagination by
@@ -717,6 +721,10 @@ timestamp window, and a `limit` all read the same file and report the same skips
   is ever searched at all — a separate opt-in field or search scope, never folded into `text`, which is
   what keeps "what the model said" separable from "how it got there" and stops reasoning from drowning
   the hits (measured: 4,378 of 6,867 assistant rows have thinking and no visible text).
+  Now that `system` rows project their prompt too, a search over `text` also matches harness text —
+  the preamble, the tool rules, every `AGENTS.md` under `<project_context>`, and skill descriptions —
+  about 2.7 MB of it across the 155 parent sessions measured 2026-10-06. A search default has to decide
+  whether prompt rows are in scope or excluded by role.
 - **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
   (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for
   this project" rather than like a mistake. Two ways out, not chosen yet: reject a
@@ -745,6 +753,12 @@ timestamp window, and a `limit` all read the same file and report the same skips
   Pi's `buildContextEntries` / `buildSessionProjection` over the same entries, which those exported
   free functions allow without `SessionManager.open()`. That is a second operation with its own
   contract, not a parameter on this one, and it stays unbuilt until it is discussed.
+- **A prompt replay, if ever wanted.** One row's `text` is that message's own rendered state, so the
+  prompt a session actually ran is a replay: fold the `system` rows in file order by section name,
+  where a `null` value removes a section. Pi exports `getCurrentSystemPrompt` in
+  `@earendil-works/pi-ai` for exactly that over a message list. Whether it belongs here (a third
+  operation, or a projection of `session_entries` output in the caller's script) is undecided; the
+  caller-side recipe needs no new API.
 - **Entry-id addressing.** `parentId` comes back but no tree is computed, so a caller that wants one
   branch root→leaf either walks ids in a script or waits for a `fromId`-style parameter. If
   citations by entry id become the norm, decide whether the reader or a future view owns that.
