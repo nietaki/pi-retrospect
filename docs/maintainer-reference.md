@@ -5,8 +5,9 @@ Verified against `@earendil-works/pi-coding-agent` **0.99.2** and
 **1.0.0** on 2026-10-02 — the shipped `dist/core/session-manager.js` and `pi-ai`
 `dist/types.d.ts` are byte-identical across those releases, so nothing here changed.
 Subagent child layout is a `pi-subagents` convention, observed against **0.74.0**.
-Measurements are snapshots of one developer machine's session store and are quoted as
-ratios or timings, never as store totals; a store grows daily.
+Measurements come from one-off scripts kept in `scratch/` (not committed, not part of the suite)
+run against one developer machine's session store, and are quoted as ratios or timings, never as
+store totals; a store grows daily.
 
 ## Maintainer reference
 
@@ -284,11 +285,11 @@ that is present but not a positive integer.
 
 **Line reading** streams instead of slurping: `FileHandle#readLines()` (Node's readline) yields one
 line at a time, so the scan costs the entries it produces rather than the file's size in memory — on a
-47 MB / 12k-entry session, measured 2026-10-05 on Node 22.22.1, peak RSS 246 MB → 148 MB and wall time
+47 MB / 12k-entry session, measured on Node 22.22.1, peak RSS 246 MB → 148 MB and wall time
 70 ms → 106 ms. The saving is roughly two copies of the file (the whole string plus the lines array),
 not the file: `raw` retains every parsed line whatever the reader does. That makes it a stress-case
 number — on a real 1.5 MB / 424-entry session the same measurement is 80 MB → 73 MB and 8 ms → 14 ms,
-so ordinary sessions feel no difference either way, and the three live files checked read
+so ordinary sessions feel no difference either way, and the live files checked read
 byte-identically. Node decides where a
 line ends, and it counts `\n`, `\r\n`, **and a lone `\r`** as breaks; `crlfDelay` does not change that,
 only whether a `\r\n` pair is one break or two. Pi writes `\n`, so this is `\n` counting for every file
@@ -347,11 +348,11 @@ mid-map rather than only before or after it.
 ### Discovery rules
 
 1. **Project directories:** only immediate subdirectories of the root whose name matches
-   `--<slug>--`. Other entries — measured here: `permission-forwarding/` — are ignored by
+   `--<slug>--`. Other entries — the live store holds `permission-forwarding/` — are ignored by
    rule, not by accident.
 2. **Top-level sessions:** `*.jsonl` files *directly* inside a project directory. Not a
    recursive search, which keeps `subagent-artifacts/*_transcript.jsonl` copies (only a
-   handful exist where this was measured, but they duplicate real children) out of the result
+   handful exist in the live store, but they duplicate real children) out of the result
    set: they are neither roots (not directly in a project dir) nor children (not under a
    parent-stem directory).
 3. **Children of a session:** every `session.jsonl` at any depth under a directory named
@@ -366,12 +367,12 @@ mid-map rather than only before or after it.
    transcript is never reported under two parents. When a nested launch does not sit under
    its parent's container, it stays attached to the nearest session that does — the
    documented fallback for the unverified grandchild convention. Recursion is implemented
-   generically and unverified: the store measured here holds no grandchild transcripts at
+   generically and unverified: the live store holds no grandchild transcripts at
    all, and every child transcript observed sits at depth `run-0`. See TODOs.
 6. **Header read:** only line 1 of each file is parsed, bounded to **4 KiB**
    (`MAX_HEADER_LINE_BYTES = 4096`). A longer first line is skipped with a warning. This is
-   deliberately tighter than Pi's own 1 MiB `MAX_SESSION_HEADER_SCAN_BYTES`: real headers
-   measured here are ~150 bytes, and a header over 4 KiB is not a session we can trust.
+   deliberately tighter than Pi's own 1 MiB `MAX_SESSION_HEADER_SCAN_BYTES`: live-store
+   headers are ~150 bytes, and a header over 4 KiB is not a session we can trust.
    A line of exactly 4096 bytes is accepted; a file whose last line has no terminating
    newline is read normally.
 7. **Symlinks are not followed.** Discovery stays inside `sessionsRoot`. Implemented by
@@ -442,7 +443,7 @@ both because the sessions root is resolved with `path.resolve()` before the walk
   rejected as a cut because a header carrying more precision would silently vanish, and adding
   86 400 000 ms to the start was rejected because a daylight-saving day is 23 or 25 hours long and
   the window would stop short of the date the caller named. Pi writes header timestamps with
-  `new Date().toISOString()` (196 of 196 timestamps on this machine's store end in `Z`), so the
+  `new Date().toISOString()` (196 of 196 timestamps in the live store end in `Z`), so the
   zone can move a bound but never a stored instant.
 - **Date-times are gated by shape, not by calendar.** `ISO_BOUND` in `src/timestamps.ts` admits an
   ISO 8601 date, optionally with a time, optional seconds and fraction, and an optional offset, so
@@ -553,7 +554,7 @@ Warnings (2)
 `session_entries` renders an index of lines and never a payload — one `lineNo type role id` bullet
 per row, with `raw` left out entirely because a single entry can exceed the context window, and
 `text` left out for the same reason in miniature: it is bounded only by the entry it came from
-(measured max 51 KB, and a `system` row averages 16.7 KB), so a row's rendered length must not depend
+(51 KB max, and a `system` row averages 16.7 KB), so a row's rendered length must not depend
 on its payload:
 
 ```
@@ -618,7 +619,7 @@ Caveat, and the reason the per-test purge is the primary mechanism rather than t
 start-of-run purge of a shared root is unsafe against **two Vitest runs in the same checkout**
 — the later run wipes the earlier one's scratch mid-flight. Run one suite at a time per worktree.
 
-Measured against the **live** store on this machine: every parent and child transcript
+Confirmed against the **live** store with a one-off `scratch/` script: every parent and child transcript
 discovered, 0 warnings, unique paths and ids, ordering correct, and the whole walk
 completes in roughly 200 ms. Running subagent workflows here is still the way to grow real
 parent/child trees for spot-checks — see TODOs.
@@ -645,20 +646,16 @@ empty header, and the `file` versus `line N` warning prefixes). Its fixtures are
 `test/fixtures/sessions/`: adding a multi-entry file there would change the row and warning counts
 that `test/list-sessions.test.ts` asserts exactly.
 
-Live-store spot-checks live in `scratch/` (not the suite, not the tarball, and never asserted on):
-`node --experimental-strip-types scratch/entries-smoke.mts` reads one real session and rejects
-`/etc/hosts`; `scratch/entries-size.mts` reports what the largest sessions return;
-`scratch/entries-store.mts` reads every parent session; `scratch/entries-artifacts.mts` walks every
-`.jsonl` under the root recursively; `scratch/text-probe.mts` reports `text` coverage, mean, and max
-per entry kind over every parent session, which is where the ratios quoted in "The `text` projection"
-come from; `scratch/text-live.mts` re-derives a user row's expected `text` from its own `raw` on live
-files and throws on any disagreement. Measured 2026-10-02: of 215 `.jsonl` files under the root, 204
-read with **0 warnings** and the other 11 — every `subagent-artifacts/*_transcript.jsonl` dump in the
-store, counted independently — refused by the header check with no other error class appearing. Every
-parent session read together: 145 files, 15,928 entries, 0 warnings, ~250 ms. `raw` came back within a
-hair of the file size (2.46 MB from a 2.4 MB session), which is the number behind the unbounded-`raw`
-limitation. These are live-store counts and drift while the operator works: the same walk measured
-212 files an hour earlier. Re-measure rather than trusting the totals.
+Live-store spot-checks are one-off scripts under `scratch/` — outside the suite, outside the
+published tarball, never asserted on, and not committed. They read the real session store, which is
+where every live-store number in these docs comes from. What they established: a recursive walk of
+the root found 215 `.jsonl` files, of which 204 read with **0 warnings** and the other 11 — every
+`subagent-artifacts/*_transcript.jsonl` dump in the store, counted independently — refused by the
+header check, with no other error class appearing. Reading every parent session together: 145 files,
+15,928 entries, 0 warnings, ~250 ms. `raw` came back within a hair of the file size (2.46 MB from a
+2.4 MB session), which is the number behind the unbounded-`raw` limitation, and the `text` coverage
+ratios in "The `text` projection" come from the same kind of run. These counts drift while the
+operator works, so re-measure rather than trusting the totals.
 
 ### Implementation guarantees
 
@@ -688,14 +685,14 @@ timestamp window, and a `limit` all read the same file and report the same skips
 
 ## TODOs
 
-- **Verify grandchild nesting.** Every child transcript in the store measured here sits at
+- **Verify grandchild nesting.** Every child transcript in the live store sits at
   `<slug>/<parent-stem>/<launch-uuid>/run-0/session.jsonl`; none launched their own
   subagent, so the recursive case is unexercised. Once a nested launch exists, confirm the
   convention — whether a child's own stem directory appears as `…/run-0/<child-stem>/…` —
   and that containment-based grouping does not attach a deep transcript to two parents.
 - **Bound `session_entries` `raw` per row.** The row range and the cap exist now — `startLineNo` /
   `endLineNo`, the set filters, `limit` — and a dropped row's `raw` is not retained, so a filtered
-  read is bounded by the rows it keeps. What is not bounded is one row: measured 2.46 MB of `raw`
+  read is bounded by the rows it keeps. What is not bounded is one row: 2.46 MB of `raw` came back
   from a 2.4 MB session, and a single entry can exceed the context window on its own. Deferred, not
   chosen: a byte budget with a continuation, or a `raw` that is omitted unless asked for. The
   decision that follows a cap: a capped read reported as a warning, as a `complete: false` field, or
@@ -720,10 +717,10 @@ timestamp window, and a `limit` all read the same file and report the same skips
   a separate operation with an index; whether it covers `text` only; and how thinking is reached if it
   is ever searched at all — a separate opt-in field or search scope, never folded into `text`, which is
   what keeps "what the model said" separable from "how it got there" and stops reasoning from drowning
-  the hits (measured: 4,378 of 6,867 assistant rows have thinking and no visible text).
+  the hits (4,378 of 6,867 assistant rows in the live store have thinking and no visible text).
   Now that `system` rows project their prompt too, a search over `text` also matches harness text —
   the preamble, the tool rules, every `AGENTS.md` under `<project_context>`, and skill descriptions —
-  about 2.7 MB of it across the 155 parent sessions measured 2026-10-06. A search default has to decide
+  about 2.7 MB of it across 155 parent sessions. A search default has to decide
   whether prompt rows are in scope or excluded by role.
 - **Resolve or reject relative `cwds`.** Header `cwd` is always absolute, so a relative entry
   (`repos/app`) or a shell tilde (`~/repos/app`) matches nothing and looks like "no history for

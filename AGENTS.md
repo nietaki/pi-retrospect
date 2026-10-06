@@ -22,3 +22,4 @@
 - Local dependency work is fair game: `npm install`, `npm ci`, `npm outdated`, adding or removing
   `devDependencies`/`dependencies` entries, and the resulting `package-lock.json` and
   `node_modules` changes. These are not "non-read-only" in the sense the rule above forbids.
+- Place one-off experiment scripts inside `scratch/`, but don't commit them or reference in the documentation

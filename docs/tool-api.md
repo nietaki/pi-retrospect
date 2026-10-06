@@ -5,6 +5,9 @@ files, and `session_entries`, which reads the entries inside one of them.
 
 These are read primitives. Neither one searches, summarizes, nor rebuilds the model's context.
 
+Measurements quoted below come from one-off scripts kept in `scratch/` — not committed, not part of
+the suite — run against the live session store. They drift; re-measure rather than trusting them.
+
 ## Calling `list_sessions`
 
 ### Purpose
@@ -60,8 +63,8 @@ Four rules decide most of what callers ask:
    `endTimestamp` covers that whole day** — the bound is the next local midnight and is never
    kept, so nothing is lost to a `23:59:59.999` cut. A day is measured as two local midnights
    rather than 86 400 000 milliseconds, so a 23- or 25-hour daylight-saving day is spanned
-   correctly. Pi writes header timestamps with `new Date().toISOString()`: measured on this
-   machine's store, 196 of 196 timestamps end in `Z`, so the zone can only ever move a *bound*,
+   correctly. Pi writes header timestamps with `new Date().toISOString()`: measured on the live
+   store, 196 of 196 timestamps end in `Z`, so the zone can only ever move a *bound*,
    never a stored instant.
 3. **A naive bound is portable by coincidence.** A date-time carrying `Z` or `±HH:MM` is one
    instant everywhere, so `"2026-02-01T13:30:00+01:00"` and `"2026-02-01T12:30:00Z"` are the same
@@ -276,9 +279,9 @@ adds no warning.
 - **Filtering is in-process, and there is no pagination.** The parameters filter, order, and
   cap rows after every header has been read; no index or cursor exists, so a `limit` never
   makes the walk cheaper. There is no offset or cursor parameter either — narrow the time
-  range instead. The currently running session **is** included — verified
-  2026-10-02, where `sessions.at(-1)` matched `$PI_SESSION_FILE`. Exclude it yourself by
-  comparing against that variable if you mean "previous sessions only".
+  range instead. The currently running session **is** included — verified against the live
+  store. Exclude it yourself by comparing against `$PI_SESSION_FILE` if you mean "previous sessions
+  only".
 - **Sessions only.** Message content is out of scope for this operation — that is
   `session_entries`, which takes a `path` from here and reads the entries inside the file.
 
@@ -541,11 +544,11 @@ The rules that hold across the table:
   visible conversation), and a block that is malformed — missing `text`, or `text` not a string — is
   dropped rather than poisoning the join.
 - **Assistant thinking is never in `text`.** It is natural language and would be findable, but it is
-  the model's reasoning rather than what it said, and measured on one store it *outlines* visible
+  the model's reasoning rather than what it said, and measured on the live store it *outlines* visible
   text: two of every three assistant rows carry thinking and no visible text at all, so folding it in
   would make `text` mostly reasoning. It stays in `raw.message.content`, reachable per block type.
 - **A system message contributes its content *and* its sections.** `content` alone projected nothing:
-  measured 2026-10-06 over the author's store, **all 168 parent-session system rows persisted
+  measured over the live store, **all 168 parent-session system rows persisted
   `content: ""`**, because `buildSystemPromptState` in `@earendil-works/pi-coding-agent` returns
   `{ content: "", sections }` for every prompt it builds normally and puts prose in `content` only for a
   forced, section-less prompt. The rule is `getSystemMessageText` in `@earendil-works/pi-ai` — content,
@@ -559,8 +562,8 @@ The rules that hold across the table:
     parent sessions hold more than one system row, and their later rows carry e.g. `{ skills }` alone —
     so the text of a patch row is the new block. Folding a sequence into the prompt the model ended up
     with is a replay over `sections` by name, which no row here performs (the recipe is below).
-  - A section value of `null` is a removal marker and contributes nothing: 0 of the 168 rows used one at
-    measurement time, but `SystemMessage.sections` is typed `Record<string, string | null>` and Pi's
+  - A section value of `null` is a removal marker and contributes nothing: 0 of the 168 rows used
+    one, but `SystemMessage.sections` is typed `Record<string, string | null>` and Pi's
     renderer skips nulls, so this does too.
   - The **tool loadout stays out**: `toolsAdded` carries complete JSON Schemas, which is why a rendered
     system message is only about a third of its own `raw` bytes.
@@ -575,7 +578,7 @@ The rules that hold across the table:
   row — it is a `string | null`, like `id`, `parentId`, and `messageRole`, not an optional key.
 - **Nothing is trimmed or truncated.** Pi's bytes survive: `"  keep the padding \n"` comes back with
   its padding. `text` is bounded only by the entry it was projected from, so a row can still be large —
-  measured 2026-10-06 over every parent session in the author's store (155 files, 17,348 rows): 64% of
+  measured over every parent session in the live store (155 files, 17,348 rows): 64% of
   rows carry text, mean 2.1 KB, max 51 KB (a `toolResult`), a `compaction` summary averages 9.8 KB, and
   a `system` row averages 16.7 KB (max 38.3 KB) — the largest category by mean. The system rule costs
   little next to `raw`: over 40 sampled sessions its rendered prompts add 0.55 MB to the 15.5 MB a full
@@ -632,9 +635,9 @@ return { prompt: [...contents, ...sections.values()].join("\n\n"), changes };
 
 One order caveat the fold has to survive: a session can open with a row that only changes the tool
 loadout, which names neither `content` nor `sections`, projects `null`, and contributes nothing (6 of
-the 168 parent rows measured 2026-10-06). Folded as above over the author's store on that date, 118 of
-the 155 parent sessions hold a system row, every one of them agrees with Pi's `getCurrentSystemPrompt`,
-and 3 lead with such a loadout-only row.
+the 168 parent rows in the live store). Folded as above over the same store, 118 of the 155 parent
+sessions hold a system row, every one of them agrees with Pi's `getCurrentSystemPrompt`, and 3 lead
+with such a loadout-only row.
 
 ### What this is not
 
@@ -678,7 +681,7 @@ and 3 lead with such a loadout-only row.
 ### Limitations
 
 - **`raw` is unbounded per row, and only `limit` and the filters bound the whole.** The result is as
-  large as the rows it keeps: measured 2026-10-02 on one store, the largest session (2.4 MB) returned
+  large as the rows it keeps: measured on the live store, the largest session (2.4 MB) returned
   356 entries and 2.46 MB of `raw`, and an unfiltered read still returns all 356. A filtered read
   retains only the rows it keeps — a dropped row's `raw` is never held — but one row can still be
   megabytes, because there is no per-row budget. Filter and project inside a script; never return
