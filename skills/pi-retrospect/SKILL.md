@@ -41,6 +41,15 @@ warnings can mean unreadable history rather than no history.
 
 ## Important distinctions
 
+### The session you are in
+
+`list_sessions` drops the current session by default, so `{ sortDirection: "desc", limit: 1 }` is
+the newest *previous* session rather than this conversation. Pass `includeCurrentSession: true` when
+the task is about the session now running — reviewing what this session has already done, or reading
+the subagent transcripts it launched. The exclusion happens before `limit`, so a capped read still
+returns a real session, and it matches by session file, never by session id or recency, so a copied
+transcript that shares the current id survives.
+
 ### Codemode exposure
 
 The tools are exposed through `codemode` only by default. Call them from a

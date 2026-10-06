@@ -34,6 +34,10 @@ return {
 };
 ```
 
+That listing takes no `includeCurrentSession`, so it reads the newest **previous** session: the running
+one is dropped before `limit` applies. See
+[Current-session exclusion](#current-session-exclusion).
+
 Avoid returning complete entries or `raw` values unless the task needs them. Transcript rows can be
 large, while a codemode script can retain only the relevant fields.
 
@@ -75,13 +79,14 @@ entries. The operation reads session headers only and never migrates or repairs 
 
 ### Parameters
 
-Every parameter is optional; `{}` returns all discoverable top-level sessions in ascending timestamp
-order.
+Every parameter is optional; `{}` returns every discoverable top-level session except the running one,
+in ascending timestamp order.
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `cwds` | non-empty `string[]` | all | Absolute working directories to keep. Relative and `~`-prefixed values are compared literally and normally match nothing. |
 | `cwdMatch` | `"exact" \| "sibling-prefix"` | `"exact"` | How each `cwds` value is matched. `sibling-prefix` also includes sibling directories shaped like adjacent worktrees. |
+| `includeCurrentSession` | boolean | `false` | Keep the session this call runs inside. By default it is excluded, with the transcripts nested under it, before filtering, sorting, and `limit`. |
 | `startTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive lower bound on the session header timestamp. |
 | `endTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive upper bound; a date-only value covers that whole local day. |
 | `sortBy` | `"timestamp" \| "cwd" \| "path" \| "id"` | `"timestamp"` | Field used to order top-level sessions. |
@@ -142,11 +147,48 @@ siblings such as `/repos/app-feature` and `/repos/app-review`. It does not match
 Consequently, an ordinary sibling named `/repos/app-backup` matches, while a real Git worktree placed
 elsewhere does not.
 
+#### Current-session exclusion
+
+The session this call runs inside is dropped from `sessions` unless `includeCurrentSession: true` asks
+for it. Its identity is the session **file** Pi reports for the call, compared as a resolved absolute
+path:
+
+- Not `id`. Two files can carry the same header id — a copy, a fork, a custom id — so a copy of the
+  current session survives while the current file itself is dropped.
+- Not recency. Being the newest session, or being in the current `cwd`, is not the same fact.
+- Not a path the caller supplies. The parameter is only a switch; which session is current comes from
+  Pi, so a model cannot point the rule at some other session it merely names.
+- Not a filesystem check. Both sides are compared as normalized text, so a hard link to the current
+  file, or the same file spelled with different case on a case-insensitive volume, is not recognized
+  as current.
+
+Because `subagentSessions` records who launched whom, a dropped node takes its own subtree with it and
+nothing is promoted to a grandparent. When the current session is itself a delegated transcript, it is
+pruned out of its parent's tree and the parent is still returned.
+
+The order of operations is exclusion, then filters, then ordering, then `limit`. That is what makes
+`{ sortDirection: "desc", limit: 1 }` mean "the newest *previous* session": the running session is
+removed first, so the one behind it takes the slot instead of the page coming back empty.
+
+Two consequences for callers:
+
+- `warnings` are unaffected. They describe the whole scan, so the excluded session's unreadable
+  neighbours are still reported even though its own rows are gone.
+- The scan is unaffected too. The current path is read before the walk and applied to the rows it
+  produced, so exclusion is not an early exit.
+
+When there is nothing to exclude the result is the ordinary one, with no error and no fallback: an
+ephemeral session (`--no-session`) has no file, and a session recorded under another `--session-dir`
+names a file this root never yielded.
+
+So a retrospective over earlier work needs no extra parameter, while inspecting this very
+conversation — or the delegated runs it has already launched — needs `includeCurrentSession: true`.
+
 ### Ordering
 
 Top-level sessions use `sortBy` and `sortDirection`, with timestamp and path tie-breakers for a stable
-total order. The default is oldest first, so without explicit sorting the newest top-level session is
-`sessions.at(-1)`.
+total order. The default is oldest first, so without explicit sorting the newest returned top-level
+session is `sessions.at(-1)` — the newest *other* one, since the current session is already gone.
 
 Nested `subagentSessions` always remain timestamp-ascending, ties by path, regardless of the requested
 top-level order. This preserves delegated-run launch order.
@@ -162,15 +204,18 @@ Interpret the two result arrays together:
 | `[]` | empty | Nothing discoverable matched, or the sessions root was empty. |
 | `[]` | non-empty | History may exist but was unreadable; do not conclude that no history exists. |
 
-Warnings cover the complete discovery walk, not only sessions retained by filters or `limit`. A failed
-child is absent from its parent's `subagentSessions` and contributes a warning naming its path.
+Warnings cover the complete discovery walk, not only sessions retained by current-session exclusion,
+filters, or `limit`. A failed child is absent from its parent's `subagentSessions` and contributes a
+warning naming its path. Excluding the current session is likewise a step over the rows the walk
+produced: its unreadable neighbours stay reported.
 
 Invalid timestamp bounds, a reversed timestamp range, and `limit < 1` throw rather than returning an
 empty result.
 
 ### Compact example
 
-The ten newest sessions for a checkout and adjacent worktree-shaped siblings:
+The ten newest sessions for a checkout and adjacent worktree-shaped siblings, this session excluded as
+always:
 
 ```js
 const { sessions, warnings } = await tools.list_sessions({
@@ -197,8 +242,10 @@ return {
 - Discovery follows supported Pi and pi-subagents storage layouts. Unreachable orphaned child trees
   are not returned and cannot produce warnings.
 - `limit` caps output but does not reduce header reads, and there is no offset or cursor.
-- The currently running session can be included. Exclude it when the task specifically means completed
-  or previous sessions.
+- The session the call runs inside is excluded by default, with the transcripts nested under it, and
+  `includeCurrentSession: true` keeps it. Identity is that session's file, so the rule is exact only
+  while Pi can name one: an ephemeral session excludes nothing, and a transcript copied under a second
+  path is not detected as the same session.
 - This operation reads metadata only. Use `session_entries` for transcript contents.
 
 ---
@@ -532,6 +579,10 @@ return { parent: parent.path, runs, discoveryWarnings };
 ```
 
 For deeper nesting, recursively flatten `subagentSessions` as in the project-history recipe.
+
+To audit the delegated runs of the session you are in rather than an earlier one, add
+`includeCurrentSession: true`. Without it the current session and its whole subtree are gone before
+`limit` applies, and `sessions.find(...)` lands on the most recent *previous* parent.
 
 ### Page a large transcript
 

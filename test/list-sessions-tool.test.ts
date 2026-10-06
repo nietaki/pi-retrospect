@@ -1,17 +1,19 @@
 /**
  * Covers the registered shape of the `list_sessions` tool (codemode-only, read-only, every
- * parameter optional), that its structured result equals `listSessions`, and that the
- * extension entry point registers exactly that one tool.
+ * parameter optional), that its structured result equals `listSessions`, that it excludes the
+ * session Pi reports as current, and that the extension entry point registers exactly that
+ * one tool.
  *
  * The two casts below exist because Pi types `execute`'s fifth argument as
- * `ExtensionToolContext` and `registerTool` as part of the full `ExtensionAPI`. Neither is
- * read by this tool: `execute` only uses the tool-call id, the params, and the signal, and
- * the extension entry point only calls `registerTool`. The fakes carry just those members.
+ * `ExtensionToolContext` and `registerTool` as part of the full `ExtensionAPI`. Of the context
+ * this tool reads only `sessionManager.getSessionFile()`, and the extension entry point only
+ * calls `registerTool`, so the fakes carry just those members.
  *
  * Contract: docs/tool-api.md
  */
 
-import { describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -23,8 +25,18 @@ const FIXTURES = new URL("./fixtures/sessions/", import.meta.url).pathname;
 
 const tool = createListSessionsTool({ sessionsRoot: FIXTURES });
 
-/** Pi's full tool context, which this tool never touches. */
-const NO_CONTEXT = {} as Parameters<typeof tool.execute>[4];
+/**
+ * A Pi tool context that reports `sessionFile` as the running session.
+ *
+ * `undefined` is the ephemeral case: Pi has a session, but no file for it to name.
+ */
+const contextWithSessionFile = (sessionFile: string | undefined) =>
+  ({
+    sessionManager: { getSessionFile: () => sessionFile },
+  }) as unknown as Parameters<typeof tool.execute>[4];
+
+/** Pi reports no session file, so nothing is current and nothing is excluded. */
+const NO_SESSION_FILE = contextWithSessionFile(undefined);
 
 /** The single member `src/index.ts` calls. */
 const fakeExtensionApi = (registered: Array<{ name: string; description: string }>) =>
@@ -52,10 +64,13 @@ describe("list_sessions tool registration", () => {
     expect(tool.exposure).toBe("codemode");
     expect(tool.annotations).toStrictEqual({ readOnlyHint: true });
 
+    // `currentSessionPath` is deliberately absent from this list: which session is current is a fact
+    // only Pi has, so a caller cannot point the exclusion rule at a session it merely names.
     expect(Object.keys(tool.parameters.properties).sort()).toStrictEqual([
       "cwdMatch",
       "cwds",
       "endTimestamp",
+      "includeCurrentSession",
       "limit",
       "sortBy",
       "sortDirection",
@@ -74,12 +89,17 @@ describe("list_sessions tool registration", () => {
     expect(tool.description).toContain("TOP-LEVEL sessions only");
     expect(tool.description).toContain("reads no git metadata");
   });
+
+  it("describes the current-session rule the caller cannot infer from the parameter name", () => {
+    expect(tool.description).toContain("current session");
+    expect(tool.description).toContain("includeCurrentSession");
+  });
 });
 
 describe("list_sessions tool execution", () => {
   it("returns structured content matching its output schema", async () => {
     const expected = await listSessions({}, { sessionsRoot: FIXTURES });
-    const result = await tool.execute("call-1", {}, undefined, undefined, NO_CONTEXT);
+    const result = await tool.execute("call-1", {}, undefined, undefined, NO_SESSION_FILE);
 
     expect(result.structuredContent).toStrictEqual(expected);
     expect(result.details).toStrictEqual(expected);
@@ -92,7 +112,13 @@ describe("list_sessions tool execution", () => {
 
   it("passes parameters through to the listing", async () => {
     const expected = await listSessions({ cwds: ["/repo/beta"] }, { sessionsRoot: FIXTURES });
-    const result = await tool.execute("call-3", { cwds: ["/repo/beta"] }, undefined, undefined, NO_CONTEXT);
+    const result = await tool.execute(
+      "call-3",
+      { cwds: ["/repo/beta"] },
+      undefined,
+      undefined,
+      NO_SESSION_FILE,
+    );
 
     expect(structured(result).sessions).toStrictEqual(expected.sessions);
     expect(firstTextBlock(result)).toMatch(/^Sessions \(3\)/m);
@@ -102,7 +128,73 @@ describe("list_sessions tool execution", () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(tool.execute("call-2", {}, controller.signal, undefined, NO_CONTEXT)).rejects.toThrow();
+    await expect(
+      tool.execute("call-2", {}, controller.signal, undefined, NO_SESSION_FILE),
+    ).rejects.toThrow();
+  });
+});
+
+describe("list_sessions current session", () => {
+  /** Two committed fixture rows, used as stand-ins for the running session. */
+  const alpha = join(
+    FIXTURES,
+    "--fixture-alpha--",
+    "2026-01-01T10-00-00-000Z_00000000-0000-4000-8000-000000000001.jsonl",
+  );
+  const beta = join(
+    FIXTURES,
+    "--fixture-beta--",
+    "2026-01-01T10-00-00-000Z_00000000-0000-4000-8000-000000000002.jsonl",
+  );
+  const pathsOf = (output: ListSessionsOutput): string[] => output.sessions.map((session) => session.path);
+
+  it("excludes the session Pi reports as current, by default", async () => {
+    const expected = await listSessions({}, { sessionsRoot: FIXTURES, currentSessionPath: alpha });
+    const result = await tool.execute("call-4", {}, undefined, undefined, contextWithSessionFile(alpha));
+
+    expect(structured(result)).toStrictEqual(expected);
+    expect(pathsOf(structured(result))).not.toContain(alpha);
+    expect(pathsOf(structured(result))).toContain(beta);
+    expect(firstTextBlock(result)).toMatch(/^Sessions \(6\)/m);
+  });
+
+  it("keeps it when includeCurrentSession is true", async () => {
+    const expected = await listSessions(
+      { includeCurrentSession: true },
+      { sessionsRoot: FIXTURES, currentSessionPath: alpha },
+    );
+    const result = await tool.execute(
+      "call-5",
+      { includeCurrentSession: true },
+      undefined,
+      undefined,
+      contextWithSessionFile(alpha),
+    );
+
+    expect(structured(result)).toStrictEqual(expected);
+    expect(pathsOf(structured(result))).toContain(alpha);
+  });
+
+  it("reads the session file on every call, so a switched session is never stale", async () => {
+    const reported = [alpha, beta];
+    const getSessionFile = vi.fn(() => reported.shift());
+    const ctx = { sessionManager: { getSessionFile } } as unknown as Parameters<typeof tool.execute>[4];
+
+    const first = structured(await tool.execute("call-6", {}, undefined, undefined, ctx));
+    const second = structured(await tool.execute("call-7", {}, undefined, undefined, ctx));
+
+    expect(getSessionFile).toHaveBeenCalledTimes(2);
+    expect(pathsOf(first)).toStrictEqual(pathsOf(await listSessions({}, { sessionsRoot: FIXTURES, currentSessionPath: alpha })));
+    expect(pathsOf(second)).toStrictEqual(pathsOf(await listSessions({}, { sessionsRoot: FIXTURES, currentSessionPath: beta })));
+    expect(pathsOf(first)).not.toContain(alpha);
+    expect(pathsOf(second)).not.toContain(beta);
+  });
+
+  it("excludes nothing when the session is ephemeral and Pi reports no file", async () => {
+    const expected = await listSessions({}, { sessionsRoot: FIXTURES });
+    const result = await tool.execute("call-8", {}, undefined, undefined, NO_SESSION_FILE);
+
+    expect(structured(result)).toStrictEqual(expected);
   });
 });
 

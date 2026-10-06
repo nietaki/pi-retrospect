@@ -4,12 +4,13 @@
  * Kept separate from the filesystem walk: this module only ever sees already-validated
  * session rows, so every rule here is testable through `listSessions` without touching disk.
  * The timestamp window and the `limit` check are shared with `session_entries` through
- * `filters.ts`.
+ * `filters.ts`. Current-session exclusion is here too: it is a rule over rows, and it runs
+ * before the query so that dropping one row lets the next one take its place under `limit`.
  *
  * Contract: docs/tool-api.md
  */
 
-import { basename, dirname } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import { parseSessionInstant } from "./timestamps.ts";
 import { requireLimit, timeWindowOf, withinWindow } from "./filters.ts";
@@ -139,4 +140,32 @@ export function applyQuery(roots: SessionMetadata[], query: SessionQuery): Sessi
   kept.sort(query.compareRoots);
 
   return query.limit === undefined ? kept : kept.slice(0, query.limit);
+}
+
+/**
+ * Remove the session the caller is running in, with every transcript nested under it.
+ *
+ * Paths are compared after `resolve()`, so one spelling is enough: Pi hands the tool the absolute
+ * session file and the scan builds its paths from a resolved root, yet a hand-written or relocated
+ * path can still differ by a `..` or a redundant segment.
+ *
+ * There is no fallback to `id`. Two files can carry the same header id — a copy, a fork, a custom
+ * id — and dropping an unrelated transcript because it happens to share an id is worse than keeping
+ * the current one, so a current path the scan never produced excludes nothing.
+ *
+ * A matched node loses its whole subtree. The transcripts under it were launched by it, so promoting
+ * them to its parent would invent a delegation that never happened.
+ *
+ * Rows are copied rather than mutated: the caller's tree keeps its shape even when a caller hands
+ * the same rows to two calls.
+ */
+export function excludeSessionTree(sessions: SessionMetadata[], currentPath: string): SessionMetadata[] {
+  const wanted = resolve(currentPath);
+
+  const prune = (rows: SessionMetadata[]): SessionMetadata[] =>
+    rows
+      .filter((row) => resolve(row.path) !== wanted)
+      .map((row) => ({ ...row, subagentSessions: prune(row.subagentSessions) }));
+
+  return prune(sessions);
 }

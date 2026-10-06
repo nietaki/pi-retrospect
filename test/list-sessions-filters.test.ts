@@ -9,7 +9,7 @@
  */
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { listSessions } from "../src/list-sessions.ts";
@@ -129,6 +129,43 @@ const DAYS: StoreRow[] = [
   { id: uuid(114), cwd: "/repo/app", timestamp: "2026-02-05T23:59:59.999Z" },
   { id: uuid(115), cwd: "/repo/app", timestamp: "2026-02-06T00:00:00.000Z" },
 ];
+
+/** Three plain top-level sessions, oldest first, for current-session cases. */
+const CURRENT: StoreRow[] = [
+  { id: uuid(161), cwd: "/repo/app", timestamp: "2026-02-01T00:00:00.000Z" },
+  { id: uuid(162), cwd: "/repo/app", timestamp: "2026-02-02T00:00:00.000Z" },
+  { id: uuid(163), cwd: "/repo/app", timestamp: "2026-02-03T00:00:00.000Z" },
+];
+
+/**
+ * Two files that carry the *same* header id, in two project directories.
+ *
+ * The committed fixtures never duplicate an id, and `makeStore` derives the filename from it,
+ * so a copy of a session file — which is what a fork or a hand copy produces — needs its own
+ * store. Returns the root plus both paths so a case can name the current one and assert on the
+ * copy by path rather than by the id they share.
+ */
+async function makeCopyStore(name: string): Promise<{ root: string; current: string; copy: string }> {
+  const root = join(TMP, name);
+  await rm(root, { recursive: true, force: true });
+
+  const current = join(root, "--scratch-a--", "current.jsonl");
+  const copy = join(root, "--scratch-b--", "copy.jsonl");
+  const header = {
+    type: "session",
+    version: 3,
+    id: uuid(180),
+    timestamp: "2026-02-01T00:00:00.000Z",
+    cwd: "/repo/app",
+  };
+
+  for (const file of [current, copy]) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, `${JSON.stringify(header)}\n`);
+  }
+
+  return { root, current, copy };
+}
 
 describe("cwds and cwdMatch", () => {
   it("selects top-level sessions by exact working directory", async () => {
@@ -397,6 +434,102 @@ describe("filters and the whole-scan warnings", () => {
 
     expect(tags(output.sessions)).toStrictEqual(["0141"]);
     expect(tags(output.sessions[0].subagentSessions)).toStrictEqual(["0142"]);
+  });
+});
+
+describe("current-session exclusion", () => {
+  /** The path `id` is not enough: the row is addressed by path, so look it up by tag first. */
+  const pathOfTag = async (root: string, wanted: string): Promise<string> => {
+    const { sessions } = await listSessions({}, { sessionsRoot: root });
+    return requireSession(sessions, wanted).path;
+  };
+
+  it("drops the session the call runs inside, by default", async () => {
+    const root = await makeStore("current-default", CURRENT);
+    const baseline = await listSessions({}, { sessionsRoot: root });
+    const current = await pathOfTag(root, "0162");
+
+    const output = await listSessions({}, { sessionsRoot: root, currentSessionPath: current });
+
+    expect(tags(output.sessions)).toStrictEqual(["0161", "0163"]);
+    expect(
+      output.warnings,
+      "exclusion narrows rows, never the statement about the scan",
+    ).toStrictEqual(baseline.warnings);
+  });
+
+  it("keeps it when includeCurrentSession is true", async () => {
+    const root = await makeStore("current-included", CURRENT);
+    const current = await pathOfTag(root, "0162");
+
+    const output = await listSessions(
+      { includeCurrentSession: true },
+      { sessionsRoot: root, currentSessionPath: current },
+    );
+
+    expect(tags(output.sessions)).toStrictEqual(["0161", "0162", "0163"]);
+  });
+
+  it("excludes before the cap, so a one-row read still returns the newest other session", async () => {
+    const root = await makeStore("current-limit", CURRENT);
+    const newest = await pathOfTag(root, "0163");
+
+    const output = await listSessions(
+      { limit: 1, sortDirection: "desc" },
+      { sessionsRoot: root, currentSessionPath: newest },
+    );
+
+    expect(tags(output.sessions)).toStrictEqual(["0162"]);
+  });
+
+  it("matches by path, so a copy carrying the same id survives", async () => {
+    const { root, current, copy } = await makeCopyStore("current-duplicate-id");
+
+    const output = await listSessions({}, { sessionsRoot: root, currentSessionPath: current });
+
+    expect(output.sessions.map((session) => session.path)).toStrictEqual([copy]);
+  });
+
+  it("does nothing when the current session has no file", async () => {
+    const root = await makeStore("current-ephemeral", CURRENT);
+    const baseline = await listSessions({}, { sessionsRoot: root });
+
+    expect(await listSessions({}, { sessionsRoot: root, currentSessionPath: undefined })).toStrictEqual(baseline);
+  });
+
+  it("does nothing for a path outside the store being scanned", async () => {
+    const root = await makeStore("current-elsewhere", CURRENT);
+    const baseline = await listSessions({}, { sessionsRoot: root });
+
+    // A `--session-dir` run records a file the scan cannot reach. A miss must not become an
+    // id fallback, which would silently drop an unrelated session that happened to share the id.
+    expect(
+      await listSessions({}, { sessionsRoot: root, currentSessionPath: "/elsewhere/0163.jsonl" }),
+    ).toStrictEqual(baseline);
+  });
+
+  it("compares by normalized path, so an equivalent spelling still matches", async () => {
+    const root = await makeStore("current-normalized", CURRENT);
+    const current = await pathOfTag(root, "0162");
+    // The same file through `..` and a redundant directory segment, which is how a hand-built
+    // or relocated path can reach the tool.
+    const directory = dirname(current);
+    const equivalent = join(root, "..", basename(root), basename(directory), basename(current));
+
+    expect(
+      await listSessions({}, { sessionsRoot: root, currentSessionPath: equivalent }),
+    ).toStrictEqual(await listSessions({}, { sessionsRoot: root, currentSessionPath: current }));
+  });
+
+  it("does nothing when the current path names a file the scan could not read", async () => {
+    const root = await makeStore("current-unreadable", CURRENT);
+    const baseline = await listSessions({}, { sessionsRoot: root });
+
+    // It is never a row, so excluding it removes nothing, and it is not the caller's session
+    // either: the row and the warning stay as the scan produced them.
+    const stray = join(root, "--scratch-9--", "stray.jsonl");
+
+    expect(await listSessions({}, { sessionsRoot: root, currentSessionPath: stray })).toStrictEqual(baseline);
   });
 });
 

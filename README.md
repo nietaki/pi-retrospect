@@ -48,6 +48,7 @@ matching parent always arrives with its complete subagent tree:
 | --- | --- | --- |
 | `cwds` | all working directories | Absolute `cwd`s to keep. |
 | `cwdMatch` | `"exact"` | `"sibling-prefix"` also keeps sibling directories whose basename extends the requested one — the shape of git worktrees placed next to the main checkout (a lexical path rule; no git metadata is read). |
+| `includeCurrentSession` | `false` | Keep the session this call runs inside. By default it is dropped, with the transcripts nested under it, before filtering, sorting, and `limit` — a retrospective normally means earlier sessions. Pi names it by its session file, never by id, so a copy of it survives; an ephemeral session has no file and so excludes nothing. |
 | `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds, read in the **host timezone**: a bare date is one whole calendar day, and a date-time with no offset is local to the machine running the tool. |
 | `sortBy`, `sortDirection` | `"timestamp"`, `"asc"` | Top-level order only; children always stay in launch order. `"desc"` puts the newest first. |
 | `limit` | none | Cap on returned rows, after filtering and sorting. Headers are still all read. |
@@ -68,6 +69,7 @@ activated on registration. Call it from a codemode script:
 
 ```js
 // in a codemode script
+// every session but this one, oldest first
 const { sessions, warnings } = await tools.list_sessions({});
 ```
 
@@ -113,6 +115,7 @@ about what was said.
 
 ```js
 // in a codemode script — project the rows in the script, never hand `raw` to a model
+// the newest *previous* session: this one is dropped before `limit` applies
 const { sessions } = await tools.list_sessions({ sortDirection: "desc", limit: 1 });
 const { entries, warnings } = await tools.session_entries({
   sessionPath: sessions[0].path,

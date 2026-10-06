@@ -41,6 +41,7 @@ export const ListSessionsParamsSchema = Type.Object(
     startTimestamp: Type.Optional(Type.String()),
     endTimestamp: Type.Optional(Type.String()),
     cwdMatch: Type.Optional(CwdMatchSchema),
+    includeCurrentSession: Type.Optional(Type.Boolean({ default: false })),
     sortBy: Type.Optional(SessionSortFieldSchema),
     sortDirection: Type.Optional(SortDirectionSchema),
     limit: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -181,6 +182,8 @@ export interface ListSessionsOptions {
   sessionsRoot: string;
   /** Aborted between filesystem operations. */
   signal?: AbortSignal;
+  /** Absolute session file of the session the caller runs inside, from the host. */
+  currentSessionPath?: string;
 }
 
 export async function listSessions(
@@ -192,9 +195,13 @@ export async function listSessions(
 Three modules split the work:
 
 - `src/list-sessions.ts` — discovery. Walks the root, reads and validates headers, nests
-  transcripts, sorts warnings. Knows nothing about filtering, ordering, or limiting.
+  transcripts, sorts warnings, and then excludes the current session and applies the query. It
+  never decides what "current" means: the tool layer reads it from `ctx.sessionManager` and hands
+  it over as `options.currentSessionPath`, so this module has no Pi context to depend on and the
+  rule is testable through a plain function call.
 - `src/query.ts` — the query. `buildQuery(params)` returns `{ matchesRoot, compareRoots,
-  limit }` and throws on bad parameters; `applyQuery(roots, query)` filters, sorts, and
+  limit }` and throws on bad parameters; `excludeSessionTree(rows, path)` drops the row whose
+  resolved `path` matches, with its subtree; `applyQuery(roots, query)` filters, sorts, and
   slices the **top level only**. It receives already-validated rows, so every parameter rule
   is testable through `listSessions` without touching disk.
 - `src/timestamps.ts` — what a time string means, and the only module that says so. No fs, no
@@ -236,6 +243,16 @@ so tests can construct the registered shape against a fixture root instead of th
 `execute()` checks the `AbortSignal` between file reads and stops early; `details`
 mirrors `structuredContent`; `outputSchema` is declared so codemode callers receive JSON
 instead of prose.
+
+The listing tool also reads the fifth `execute()` argument, Pi's tool context, and asks
+`ctx.sessionManager.getSessionFile()` for the current session file. It asks per call and caches
+nothing: `/new`, `/resume`, and `/fork` change which file is current inside one process, and a stale
+path would exclude the wrong transcript. The access chain is written `ctx?.sessionManager?.getSessionFile()`
+even though Pi types all three as present, because the factory-built tool is also executed by tests
+and by direct SDK calls that hand over no session context — and "no context" must mean "no current
+session to exclude", not a crash inside a read-only tool. The tool never interprets the value: it
+passes it straight to `listSessions` as `options.currentSessionPath`, so the rule lives in the query
+layer with the other row rules.
 
 ### `session_entries` boundary
 
@@ -479,6 +496,19 @@ both because the sessions root is resolved with `path.resolve()` before the walk
   `dirname()` and has a basename starting with `<requested-basename>-`. No `git` call, no
   `realpath`, no case folding: path comparisons stay exactly as headers recorded them.
 - **`limit` caps output, not work.** Headers are all read first; there is no index.
+- **Current-session exclusion is a path rule, applied first.** `listSessions` calls it only when
+  `params.includeCurrentSession !== true` and `options.currentSessionPath` is a non-empty string;
+  `excludeSessionTree` then compares `resolve()` of both sides and copies rows rather than mutating
+  them. The host fact is deliberately not a parameter: a `currentSessionPath` in the schema would let
+  a model exclude any session it can name, and `"this one, by the way"` is a fact only Pi has. A miss
+  is silence, not a fallback — there is no match by `id`, by `cwd`, or by recency, because dropping an
+  unrelated transcript on a shared id is worse than leaving the current one in. Like `sibling-prefix`,
+  the comparison is lexical: no `realpath`, no case folding. A hard link or a differently cased
+  spelling of the same file on a case-insensitive volume is not detected, and a copy under a second
+  path survives — which is the point of matching the file rather than the id.
+- **The tree is pruned, not reparented.** A matched node's `subagentSessions` go with it. Children
+  describe who launched them, so promoting a grandchild would claim a delegation that never happened,
+  and leaving it at the top level would claim it was a parent session.
 - **Errors are throws.** A bound that fails the ISO shape gate, one with no instant behind it,
   a range ending before it starts, and `limit < 1` each throw, which the tool layer turns into a
   failed tool result. A rollover (`"2026-02-30"`) and a naive date-time do not throw — they mean
@@ -541,9 +571,14 @@ shape: that the default order is oldest-first so `sessions.at(-1)` is the newest
 filters and ordering act on top-level sessions while children arrive whole and in launch
 order, that a date-only `endTimestamp` means the whole day in the host timezone, that `sibling-prefix` is a
 path heuristic rather than git detection, that nesting is expressed by `subagentSessions`
-while `parentSessionPath` is fork lineage, and that an empty list plus warnings means
+while `parentSessionPath` is fork lineage, that the current session is dropped by default and
+`includeCurrentSession: true` is what asks for it back, and that an empty list plus warnings means
 unreadable rather than absent history. It currently does not say that `path` is the handle
 to key on — see TODOs.
+
+The exclusion belongs in the description precisely because the default is invisible: a caller who
+does not know it reads `{ sortDirection: "desc", limit: 1 }` as "this conversation" when it means
+"the one before this", and the difference is the whole point of a retrospective.
 
 `exposure`, `annotations`, and `outputSchema` require **Pi >= 0.99.0** (added
 2026-09-29). Peer ranges stay `"*"` because that is Pi's stated convention for
@@ -732,10 +767,11 @@ timestamp window, and a `limit` all read the same file and report the same skips
   to check the synthetic layout against reality. Do not commit the output.
 - **Remaining filter parameters.** Time range, `cwd`, ordering, and a row cap exist now. For
   `session_entries` the line range, `ids`, `parentIds`, `types`, `messageRoles`, the timestamp
-  window, a literal `search` over `text`, and `limit` exist now. Still deferred: by presence or count
-  of subagents, `includeCurrentSession`
-  (the currently running session is included today; an exclusion parameter is the agreed future
-  direction, most likely `excludePaths`), and a depth limit for `subagentSessions`. Entry-level
+  window, a literal `search` over `text`, and `limit` exist now, and so does current-session
+  exclusion (`includeCurrentSession`, default `false`, on the file Pi reports for the call). Still
+  deferred: by presence or count
+  of subagents, a general `excludePaths` for sessions other than the running one, and a depth limit
+  for `subagentSessions`. Entry-level
   searches over `raw` — a field path, a JSON shape, thinking, tool-call arguments — are deliberately
   absent: they would need an index to be worth the scan, and none exists.
 - **The search surface over `text` is decided; its extensions are not.** Chosen 2026-10-06: literal

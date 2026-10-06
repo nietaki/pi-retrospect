@@ -41,6 +41,11 @@ export const CwdMatchSchema = Type.Union([Type.Literal("exact"), Type.Literal("s
  *
  * Every filter selects **top-level** sessions. A top-level session that matches keeps its
  * complete `subagentSessions` tree, whatever the children's own cwd or timestamp is.
+ *
+ * Current-session exclusion is the one rule that reaches the tree: dropping the session the caller
+ * runs inside also drops the transcripts nested under it, and it runs before the filters, the order,
+ * and the cap. The path to drop is a runtime fact supplied through `ListSessionsOptions`, never a
+ * parameter, so a caller cannot name somebody else's session.
  */
 export const ListSessionsParamsSchema = Type.Object(
   {
@@ -64,6 +69,13 @@ export const ListSessionsParamsSchema = Type.Object(
       }),
     ),
     cwdMatch: Type.Optional(CwdMatchSchema),
+    includeCurrentSession: Type.Optional(
+      Type.Boolean({
+        default: false,
+        description:
+          "Keep the session this call runs inside. Omitted or false drops it, with the transcripts nested under it, before filtering, sorting, and limit apply, because a retrospective normally means earlier sessions. Pi names the current session by its file, so identity is a path and never a session id: a copy sharing the current id survives. Nothing is dropped when the session is ephemeral and Pi reports no file for it.",
+      }),
+    ),
     sortBy: Type.Optional(SessionSortFieldSchema),
     sortDirection: Type.Optional(SortDirectionSchema),
     limit: Type.Optional(

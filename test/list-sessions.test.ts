@@ -157,6 +157,51 @@ describe("listSessions discovery", () => {
   });
 });
 
+describe("current-session pruning keeps the hierarchy honest", () => {
+  /** The committed parent that owns three delegated runs, one of which owns a grandchild. */
+  const parentPath = (): string => requireSession(sessions, "0003").path;
+  const grandchildBearerPath = (): string => requireSession(sessions, "0003").subagentSessions[0].path;
+
+  it("drops a current top-level session together with every transcript under it", async () => {
+    const path = parentPath();
+    const container = path.slice(0, -".jsonl".length);
+    const output = await listSessions({}, { sessionsRoot: FIXTURES, currentSessionPath: path });
+    const kept = flatten(output.sessions);
+
+    expect(tags(output.sessions)).toStrictEqual(["0004", "0001", "0002", "0012", "0013", "0005"]);
+    expect(
+      kept.every((session) => !session.path.startsWith(`${container}/`)),
+      "nothing from the current session's container survives, so no child is promoted",
+    ).toBe(true);
+    expect(output.warnings).toStrictEqual(warnings);
+  });
+
+  it("drops a current nested transcript and its own children, keeping parent and siblings", async () => {
+    const path = grandchildBearerPath();
+    const output = await listSessions({}, { sessionsRoot: FIXTURES, currentSessionPath: path });
+    const parent = requireSession(output.sessions, "0003");
+    const kept = flatten(output.sessions);
+
+    expect(tags(parent.subagentSessions), "the two runs that were not current").toStrictEqual(["0031", "0032"]);
+    expect(kept.some((session) => tag(session.id) === "0033"), "the grandchild went with its launcher").toBe(
+      false,
+    );
+    expect(kept.some((session) => session.path === path)).toBe(false);
+    expect(output.warnings).toStrictEqual(warnings);
+  });
+
+  it("keeps the whole tree when includeCurrentSession asks for the current session", async () => {
+    const path = parentPath();
+    const output = await listSessions(
+      { includeCurrentSession: true },
+      { sessionsRoot: FIXTURES, currentSessionPath: path },
+    );
+
+    expect(output).toStrictEqual({ sessions, warnings });
+    expect(requireSession(output.sessions, "0003").subagentSessions.length).toBe(3);
+  });
+});
+
 describe("listSessions warnings", () => {
   it("skips and warns about unreadable and invalid files, once each", () => {
     const expectedReasons: Array<[string, RegExp]> = [

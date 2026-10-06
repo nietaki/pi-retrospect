@@ -3,7 +3,8 @@
  * nested under the session that launched them.
  *
  * Parameter handling — filtering, ordering, limiting — lives in `query.ts`; this module only
- * discovers and validates rows, then applies the prepared query to the top level.
+ * discovers and validates rows, drops the current session when the host named one, then applies
+ * the prepared query to the top level.
  *
  * Contract: docs/tool-api.md
  */
@@ -11,7 +12,7 @@
 import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
-import { applyQuery, buildQuery, instantOf } from "./query.ts";
+import { applyQuery, buildQuery, excludeSessionTree, instantOf } from "./query.ts";
 import { readSessionHeader } from "./session-metadata.ts";
 import type {
   ListSessionsOutput,
@@ -36,6 +37,15 @@ export interface ListSessionsOptions {
   sessionsRoot: string;
   /** Aborted between filesystem operations. */
   signal?: AbortSignal;
+  /**
+   * Absolute path of the session the caller is running in, from `ctx.sessionManager.getSessionFile()`.
+   *
+   * The host supplies it and `includeCurrentSession` can ask for that session back, so a model can
+   * never point the rule at a session it merely names. Omit it, or pass the `undefined` Pi returns
+   * for an ephemeral session, and nothing is excluded. A path this scan never produced excludes
+   * nothing: the rule is the file, not its id.
+   */
+  currentSessionPath?: string;
 }
 
 type ParsedSession = {
@@ -188,13 +198,17 @@ function nestTranscripts(
 }
 
 /**
- * List discoverable sessions under `options.sessionsRoot`, after the query built from
+ * List discoverable sessions under `options.sessionsRoot`, after the query described by
  * `params` is applied to the top level.
  *
  * Without parameters the result is every session, ordered by `timestamp` ascending — oldest
  * first, so a parent's subagent children appear in launch order. Files that cannot be read or
  * whose header is invalid are skipped and reported in `warnings` instead; `warnings` always
  * describe the whole scan, even for files a filter would have excluded.
+ *
+ * When `options.currentSessionPath` names the caller's own session it is excluded first, unless
+ * `params.includeCurrentSession` asks for it: the whole-scan rule behind `warnings` is exactly why
+ * dropping a row is a step of its own rather than part of the walk.
  */
 export async function listSessions(
   params: ListSessionsParams,
@@ -263,5 +277,12 @@ export async function listSessions(
 
   warnings.sort(compareWarnings);
 
-  return { sessions: applyQuery(sessions, query), warnings };
+  // The current session is a fact about the host, so the scan stays a scan and the rule applies to
+  // the rows it produced: before filtering, ordering, and the cap, so a dropped root leaves its place
+  // to the next one rather than shortening the result by one. An unset path — no context, an
+  // ephemeral session, or `includeCurrentSession: true` — excludes nothing.
+  const currentPath = params.includeCurrentSession === true ? undefined : options.currentSessionPath;
+  const roots = currentPath ? excludeSessionTree(sessions, currentPath) : sessions;
+
+  return { sessions: applyQuery(roots, query), warnings };
 }
