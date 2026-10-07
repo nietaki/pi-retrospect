@@ -41,6 +41,8 @@ const fakeExtensionApi = (registered: Array<{ name: string; description: string 
     registerTool: (definition: { name: string; description: string }) => {
       registered.push(definition);
     },
+    // `src/index.ts` also subscribes the steering marker to input; these tests only read the tools.
+    on: () => () => {},
   }) as unknown as ExtensionAPI;
 
 beforeAll(async () => {

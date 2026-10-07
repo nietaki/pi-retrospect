@@ -1,25 +1,59 @@
-# Project intentions
+# Project purpose
 
-- Build `pi-retrospect` as a Pi package that gives the agent a tool for exploring past sessions and their messages.
-- Keep product scope open until it is discussed. Do not assume which sessions are included or choose search, indexing, or filtering behavior without agreement.
+- Build `pi-retrospect` as a Pi package that gives agents a tool for exploring past sessions and their messages.
+- Keep product scope open until it is discussed with the operator.
+- Do not assume:
+  - which sessions are included;
+  - how sessions are searched or indexed;
+  - which filtering behavior is appropriate.
+- Discuss API decisions and usage assumptions with the operator before committing to them.
+
+# Implementation
+
 - Write implementation code in TypeScript.
-- Establish tests early and use them to guide behavior.
-- The test runner is Vitest: keep the suite in TypeScript at `test/*.test.ts`, run it with
-  `npm test` (or `npm run coverage` for the v8 report over every `src` module), and let
-  `npm run check` stay the gate that runs the suite together with `tsc --noEmit`. Tests may
-  write throwaway fixtures under `test/tmp/`, which is gitignored.
-- `test/tmp/` is generated state and must never be a precondition: every test purges or writes the scratch path it asserts on before asserting on it, `test/global-setup.ts` (Vitest `globalSetup`) removes `test/tmp/` at the start of each run, and `npm run clean` (first step of `npm run check`) purges it on demand. Do not add a scratch assertion that depends on a path being empty or absent unless the same test creates or removes that path, and do not run two Vitest suites in the same checkout at once — the start-of-run purge is not concurrency-safe.
-- Prefer documented Pi APIs and extension integration points over assumptions about the user's filesystem, configuration, or environment. Check current Pi documentation and types when choosing an API.
+- Prefer documented Pi APIs and extension integration points over assumptions about the user's filesystem, configuration, or environment.
+- Check the current Pi documentation and types when choosing an API.
 - Keep dependencies minimal. Add runtime dependencies only when required and justified.
-- Keep tests and type-checking passing with `npm run check`.
-- Do not make API decisions or usage assumptions without discussing them with the operator
 
-# Development rules
+# Testing and validation
 
-- Don't run non-read-only commands against the npm registry: no `npm publish`, `npm unpublish`,
-  `npm deprecate`, `npm dist-tag`, `npm owner`, `npm star`, or anything else that changes the
-  published state of this package. Publishing is the operator's job.
-- Local dependency work is fair game: `npm install`, `npm ci`, `npm outdated`, adding or removing
-  `devDependencies`/`dependencies` entries, and the resulting `package-lock.json` and
-  `node_modules` changes. These are not "non-read-only" in the sense the rule above forbids.
-- Place one-off experiment scripts inside `scratch/`, but don't commit them or reference in the documentation
+- Establish tests early and use them to guide behavior.
+- Write tests in TypeScript under `test/*.test.ts`.
+- Use the project scripts:
+  - `npm test` — run the Vitest suite.
+  - `npm run coverage` — run the suite with v8 coverage over every `src` module.
+  - `npm run check` — run the full gate, including tests and `tsc --noEmit`.
+- Keep `npm run check` passing.
+
+## Temporary test state
+
+- Tests may create throwaway fixtures under the gitignored `test/tmp/` directory.
+- Treat `test/tmp/` as generated state, never as a precondition.
+- Every test must create or remove the scratch paths whose state it asserts.
+- Do not assert that a path is empty or absent unless the same test first establishes that state.
+- `test/global-setup.ts` removes `test/tmp/` at the start of each Vitest run.
+- `npm run clean`, which is the first step of `npm run check`, also removes `test/tmp/`.
+- Do not run two Vitest suites concurrently in the same checkout; the start-of-run cleanup is not concurrency-safe.
+
+# Dependencies and npm
+
+- Local dependency operations are allowed, including:
+  - `npm install`
+  - `npm ci`
+  - `npm outdated`
+  - adding or removing dependency entries
+  - changes to `package-lock.json` and `node_modules`
+- Do not perform operations that modify the published npm package, including:
+  - `npm publish`
+  - `npm unpublish`
+  - `npm deprecate`
+  - `npm dist-tag`
+  - `npm owner`
+  - `npm star`
+- Publishing and other npm-registry mutations are the operator's responsibility.
+
+# Experiments
+
+- Put one-off experiment scripts in `scratch/`.
+- Do not commit experiment scripts.
+- Do not reference them from project documentation.

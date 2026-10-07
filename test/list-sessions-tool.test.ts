@@ -38,12 +38,13 @@ const contextWithSessionFile = (sessionFile: string | undefined) =>
 /** Pi reports no session file, so nothing is current and nothing is excluded. */
 const NO_SESSION_FILE = contextWithSessionFile(undefined);
 
-/** The single member `src/index.ts` calls. */
+/** The two members `src/index.ts` calls: it registers the tools and subscribes to input. */
 const fakeExtensionApi = (registered: Array<{ name: string; description: string }>) =>
   ({
     registerTool: (definition: { name: string; description: string }) => {
       registered.push(definition);
     },
+    on: () => () => {},
   }) as unknown as ExtensionAPI;
 
 /** Pull the text out of a tool result without pretending the union is a text block. */

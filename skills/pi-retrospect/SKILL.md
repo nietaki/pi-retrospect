@@ -39,6 +39,28 @@ limitations.
 Check `warnings` when the task depends on completeness. An empty result with
 warnings can mean unreadable history rather than no history.
 
+## Investigating steering messages
+
+When the task is to identify corrections or recurring misunderstandings:
+
+1. Search user messages for the literal, case-sensitive `STEERING: ` text, then
+   prefer candidates whose `text` starts with that exact prefix.
+2. Inspect the surrounding conversation to determine what prompted each
+   correction and how the agent responded.
+3. Compare matches across sessions before concluding that an instruction,
+   tool, skill, or workflow causes a recurring problem.
+4. Retain session paths and entry line numbers when reporting evidence.
+
+The marker is a high-signal convention, not authoritative metadata. When
+`piRetrospect.markSteeringMessages` is enabled, `pi-retrospect` prepends it to
+interactive and RPC steering submitted while an agent is streaming; it does not
+mark extension-generated or slash-prefixed input. The prefix is ordinary user
+message text seen by the model and stored in the transcript, so a user can type
+it manually. Unmarked steering can also exist because marking was disabled or
+because the message belonged to an excluded category. Existing history is
+never rewritten. See [`docs/tool-api.md`](../../docs/tool-api.md#marking-steering-messages)
+for the complete marking rules.
+
 ## Important distinctions
 
 ### The session you are in

@@ -1,15 +1,32 @@
 # pi-retrospect
 
-A [Pi](https://github.com/earendil-works/pi) package that gives an agent tools for
-exploring past Pi sessions and the messages they contain — the read side of harness
-self-improvement. An agent that can look back over its own previous sessions can find
-the conversation where it hit a given error, recover a decision it made, and audit
-what actually happened before repeating it.
+`pi-retrospect` is a [Pi](https://github.com/earendil-works/pi) package for
+learning from previous Pi sessions. It helps agents recover prior context, audit
+completed work, compare approaches, understand how a task was handled, and improve
+the local harness that produced it.
 
-**Status: 0.x, early.** Two operations are implemented — `list_sessions` (find session files) and
-`session_entries` (read the entries inside one, filter them, and search their text), both
-codemode-callable; see [`docs/tool-api.md`](docs/tool-api.md) for their contracts. Anything beyond
-reading history — ranking it, or writing back — stays out of scope until it is discussed.
+Past sessions can reveal repeated failures, ineffective instructions, tool friction,
+delegation problems, and opportunities to improve local skills, prompts, tools, and
+workflows.
+
+The package provides two read-only tools for discovering recorded sessions and
+inspecting their entries. It also includes a skill that guides agents through
+retrospective analysis and an optional setting that makes steering corrections easier
+to find later.
+
+> **Status:** `pi-retrospect` is an early 0.x package. Its session-discovery and
+> transcript-reading tools are implemented and usable, but broader capabilities such
+> as ranking or modifying history remain out of scope until their behavior is
+> discussed.
+
+## What can it help with?
+
+- Recover decisions or context from an earlier session.
+- Understand how a previous task was approached.
+- Audit what an agent or delegated subagent actually did.
+- Compare approaches used across multiple sessions.
+- Find recurring failures, corrections, or misunderstandings.
+- Identify improvements to instructions, skills, prompts, tools, and workflows.
 
 ## Install
 
@@ -153,6 +170,69 @@ the model's context view. In a session file older than version 2, `id` and `pare
 even where the line stores them — Pi
 replaces every id when it migrates such a file — and one `legacy_version` warning says so; `lineNo`
 is the handle that stays valid, and `raw` keeps what was written.
+
+## Steering-message markers
+
+A mid-run correction often means the agent misunderstood the task. Making those corrections findable
+turns one-off friction into evidence of recurring harness problems: an instruction that is not
+landing, a tool that keeps getting misused, or a repo whose `AGENTS.md` needs a clearer rule.
+
+### Enable marking
+
+Installing the package registers the two read-only tools without changing input. To opt into marking,
+set `markSteeringMessages` in the user-level `~/.pi/agent/settings.json` or a trusted project's
+`.pi/settings.json`, which Pi merges over the user value:
+
+```json
+{
+  "piRetrospect": {
+    "markSteeringMessages": true
+  }
+}
+```
+
+The default is `false`. After editing the settings file, run `/reload`.
+
+### What gets marked
+
+While the setting is enabled, `pi-retrospect` prepends `STEERING: ` to steering input submitted from
+the interactive UI or an RPC client while the agent is streaming. It leaves idle prompts, queued
+follow-ups, extension-generated input, slash-prefixed input, and text that already starts with the
+exact marker unchanged. Attached images are preserved.
+
+The prefix is part of the user message sent to the model and stored in the transcript, not separate
+metadata. This changes what the model sees — often usefully, because the correction is explicitly
+labelled — as well as making the message searchable later.
+
+### Find and interpret markers
+
+Use a literal, case-sensitive search over user messages, then keep entries where the automatic marker
+appears as a prefix:
+
+```js
+// in a codemode script — the marked steering messages of one session
+const { entries, warnings } = await tools.session_entries({
+  sessionPath,
+  messageRoles: ["user"],
+  search: { terms: ["STEERING: "], caseSensitive: true },
+});
+
+return {
+  steeringMessages: entries
+    .filter(({ text }) => text?.startsWith("STEERING: ") === true)
+    .map(({ lineNo, text }) => ({ lineNo, text })),
+  warnings,
+};
+```
+
+Treat matches as high-signal candidates, not authoritative metadata. A user can type the same prefix
+manually, and unmarked steering can exist when the setting was disabled or the input belonged to an
+excluded category. Inspect the surrounding conversation before deciding why the user intervened, and
+compare sessions before concluding that a misunderstanding recurs.
+
+Only messages submitted while marking is enabled receive the prefix. Existing history is never
+rewritten, and disabling the setting does not remove markers already stored. The full behavior is in
+[`docs/tool-api.md`](docs/tool-api.md#marking-steering-messages).
 
 ## Reference
 
