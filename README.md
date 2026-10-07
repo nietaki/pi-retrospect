@@ -258,6 +258,30 @@ CI is `.github/workflows/ci.yml`: on pull requests, pushes to `master`, and manu
 installs with `npm ci`, runs `npm run check`, and verifies the tarball contents with
 `npm pack --dry-run`. It publishes nothing.
 
+### Releasing
+
+Releases are run locally with [release-it](https://github.com/release-it/release-it). Start from a
+clean `master` branch that tracks its upstream and make sure npm is authenticated for this package.
+Preview the interactive flow without changing Git or npm state:
+
+```sh
+npm run release:dry-run
+```
+
+A dry run still performs read-only prerequisite checks such as npm authentication. For a real
+release, run either the interactive version selector or name the SemVer increment explicitly:
+
+```sh
+npm run release
+npm run release -- patch
+```
+
+The release runs `npm run check`, updates `package.json` and `package-lock.json`, creates and pushes
+a `chore: release vX.Y.Z` commit and `vX.Y.Z` tag, and publishes the package to npm. The existing
+`prepublishOnly` guard runs the checks again immediately before publication, so a direct
+`npm publish` remains protected too. This workflow does not create a GitHub Release or maintain a
+changelog.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
