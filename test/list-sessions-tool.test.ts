@@ -102,6 +102,13 @@ describe("list_sessions tool registration", () => {
     expect(tool.description).toContain("current session");
     expect(tool.description).toContain("includeCurrentSession");
   });
+
+  it("describes the access bound the caller cannot widen", () => {
+    // The setting is not a parameter, so the only place a caller meets it is the description: that
+    // `cwds` selects within the operator's bound, and that an omitted bound changes nothing.
+    expect(tool.description).toContain("piRetrospect.allowedProjects");
+    expect(tool.description).toMatch(/can never widen it/);
+  });
 });
 
 describe("list_sessions tool execution", () => {
@@ -249,6 +256,24 @@ describe("list_sessions project access", () => {
     // The refusal says nothing about the settings, the sessions, or where either lives.
     expect(message).not.toContain("hidden-project");
     expect(message).not.toContain(FIXTURES);
+  });
+
+  it("re-decides which projects to report from the snapshot it reads on each call", async () => {
+    // The two halves meet here: a reader asked per call, and a listing that answers to the policy it
+    // returned. One tool instance, two effective settings, and no re-registration in between.
+    const snapshots = [{}, { piRetrospect: { allowedProjects: ["beta"] } }];
+    const gated = createListSessionsTool({ sessionsRoot: FIXTURES, readSettings: () => snapshots.shift() });
+
+    const unrestricted = structured(await gated.execute("access-5", {}, undefined, undefined, NO_SESSION_FILE));
+    const restricted = structured(await gated.execute("access-6", {}, undefined, undefined, NO_SESSION_FILE));
+
+    expect(new Set(unrestricted.sessions.map((session) => session.cwd))).toStrictEqual(
+      new Set(["/repo/alpha", "/repo/beta"]),
+    );
+    expect(new Set(restricted.sessions.map((session) => session.cwd))).toStrictEqual(new Set(["/repo/beta"]));
+    // The denied projects are gone, and so is everything the scan would have said about them: the
+    // committed fixtures hold their unreadable files inside the same directories.
+    expect(restricted.warnings).toStrictEqual([]);
   });
 
   it("lists the same sessions as the listing does when no settings reader was supplied", async () => {

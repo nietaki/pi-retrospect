@@ -3,8 +3,8 @@
  * nested under the session that launched them.
  *
  * Parameter handling — filtering, ordering, limiting — lives in `query.ts`; this module only
- * discovers and validates rows, drops the current session when the host named one, then applies
- * the prepared query to the top level.
+ * discovers and validates rows, keeps to the projects `options.policy` allows, drops the current
+ * session when the host named one, then applies the prepared query to the top level.
  *
  * Contract: docs/tool-api.md
  */
@@ -13,6 +13,8 @@ import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { applyQuery, buildQuery, excludeSessionTree, instantOf } from "./query.ts";
+import { isProjectAllowed, UNRESTRICTED_POLICY } from "./project-access.ts";
+import type { ProjectAccessPolicy } from "./project-access.ts";
 import { readSessionHeader } from "./session-metadata.ts";
 import type {
   ListSessionsOutput,
@@ -46,6 +48,18 @@ export interface ListSessionsOptions {
    * nothing: the rule is the file, not its id.
    */
   currentSessionPath?: string;
+  /**
+   * Which session projects the scan may report, read from the caller's effective settings.
+   *
+   * This is the extension-enforced upper bound, applied while discovering, before a denied session's
+   * children are collected or a denied directory's unreadable files are warned about. Omit it — the
+   * listing used as a library — and every project the scan finds is reported, which is the behavior
+   * from before `piRetrospect.allowedProjects` existed.
+   *
+   * A caller's `cwds` and `cwdMatch` still choose which of the permitted projects to return; they
+   * cannot reach past this bound.
+   */
+  policy?: ProjectAccessPolicy;
 }
 
 type ParsedSession = {
@@ -209,6 +223,11 @@ function nestTranscripts(
  * When `options.currentSessionPath` names the caller's own session it is excluded first, unless
  * `params.includeCurrentSession` asks for it: the whole-scan rule behind `warnings` is exactly why
  * dropping a row is a step of its own rather than part of the walk.
+ *
+ * `options.policy` is the upper bound on which projects any of this may describe. It is asked of each
+ * validated top-level header, before that session's container is walked, so a denied project
+ * contributes no row, no nested transcript, and no warning; the caller's own filters then select
+ * within what the policy permitted.
  */
 export async function listSessions(
   params: ListSessionsParams,
@@ -219,6 +238,7 @@ export async function listSessions(
 
   const sessionsRoot = resolve(options.sessionsRoot);
   const { signal } = options;
+  const policy = options.policy ?? UNRESTRICTED_POLICY;
   const warnings: ListSessionsWarning[] = [];
   const sessions: SessionMetadata[] = [];
 
@@ -259,6 +279,14 @@ export async function listSessions(
       continue;
     }
 
+    // A file with no readable header cannot name its own project, so saying whether its warning
+    // belongs to a denied project is a question about the whole directory: it is answered after the
+    // directory's valid headers have been asked, and a directory that holds nothing readable keeps
+    // its warning, because nothing here ever established that it was denied.
+    const unreadable: ListSessionsWarning[] = [];
+    let admitted = 0;
+    let refused = 0;
+
     for (const file of projectEntries) {
       throwIfAborted(signal);
       if (!file.isFile() || !file.name.endsWith(SESSION_EXTENSION)) continue;
@@ -266,13 +294,25 @@ export async function listSessions(
       const path = join(projectDir, file.name);
       const header = await readSessionHeader(path);
       if (!header.ok) {
-        warnings.push({ path, reason: header.reason });
+        unreadable.push({ path, reason: header.reason });
         continue;
       }
 
+      // Denied before its container is walked: a child transcript of a session nobody may see is
+      // neither a row nor a warning, and the tree under it never becomes observable metadata.
+      if (!isProjectAllowed(policy, header.values.cwd)) {
+        refused += 1;
+        continue;
+      }
+
+      admitted += 1;
       const transcripts = await collectSubagentTranscripts(containerOf(path), warnings, signal);
-      sessions.push(toMetadata({ path, ...header.values }, nestTranscripts(containerOf(path), transcripts, signal)));
+      sessions.push(
+        toMetadata({ path, ...header.values }, nestTranscripts(containerOf(path), transcripts, signal)),
+      );
     }
+
+    if (refused === 0 || admitted > 0) warnings.push(...unreadable);
   }
 
   warnings.sort(compareWarnings);

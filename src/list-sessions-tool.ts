@@ -60,6 +60,12 @@ export function createListSessionsTool(options: ListSessionsToolOptions) {
       "other session rather than an empty list. Pass includeCurrentSession: true when the task means this",
       "very conversation, or wants the subagent runs this session already launched.",
       "An unparseable timestamp, a range ending before it starts, and a limit below 1 throw.",
+      "The operator can bound which projects either retrospective tool may reach with the",
+      "`piRetrospect.allowedProjects` setting, whose values are project cwd basenames: an allowed name",
+      "covers that project and its `-`-suffixed worktree siblings, and nothing else. The bound is",
+      "enforced here, before a session's children or warnings are collected, so `cwds` and `cwdMatch`",
+      "select within it and can never widen it; a denied project contributes no row, no nested",
+      "transcript, and no warning. Omitted configuration keeps every project reachable.",
     ].join(" "),
     parameters: ListSessionsParamsSchema,
     outputSchema: ListSessionsOutputSchema,
@@ -76,11 +82,12 @@ export function createListSessionsTool(options: ListSessionsToolOptions) {
       // effective settings change inside one Pi process, and `/reload` is what picks up an edited
       // allowlist. A policy this call cannot read fails the call before the scan starts rather than
       // falling back to the wide-open access the operator's typo was meant to prevent.
-      readProjectAccessPolicy(options.readSettings);
+      const policy = readProjectAccessPolicy(options.readSettings);
 
       const output = await listSessions(params, {
         sessionsRoot: options.sessionsRoot,
         currentSessionPath,
+        policy,
         signal,
       });
 
