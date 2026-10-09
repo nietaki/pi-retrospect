@@ -58,6 +58,13 @@
 - Do not commit experiment scripts.
 - Do not reference them from project documentation.
 
+# Changelog
+
+- Add each notable user-facing change to the `[Unreleased]` section of `CHANGELOG.md` in the same change that implements it.
+- Use the Keep a Changelog categories (`Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, and `Security`) and describe outcomes for users rather than commit-level implementation details.
+- During development, do not replace `[Unreleased]` with a version or date and do not update release comparison links manually. The configured release-it plugin performs that mechanical finalization after the release version is selected.
+- Keep internal-only maintenance out of the changelog unless it materially affects package users, contributors, compatibility, or the release process.
+
 # Documentation
 
 Maintain documentation according to its audience and level of abstraction. Prefer

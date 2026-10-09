@@ -283,6 +283,7 @@ rewritten, and disabling the setting does not remove markers already stored. The
 
 ## Reference
 
+- [`CHANGELOG.md`](CHANGELOG.md) — notable changes by release
 - [`docs/tool-api.md`](docs/tool-api.md) — the contract for the operations this
   package exposes: `list_sessions` (discovery rules, filters, ordering, guarantees) and
   `session_entries` (sessions-root confinement, line addressing, entry filters, the literal
@@ -324,11 +325,11 @@ npm run release
 npm run release -- patch
 ```
 
-The release runs `npm run check`, updates `package.json` and `package-lock.json`, creates and pushes
-a `chore: release vX.Y.Z` commit and `vX.Y.Z` tag, and publishes the package to npm. The existing
-`prepublishOnly` guard runs the checks again immediately before publication, so a direct
-`npm publish` remains protected too. This workflow does not create a GitHub Release or maintain a
-changelog.
+The release runs `npm run check`, finalizes [`CHANGELOG.md`](CHANGELOG.md), updates `package.json`
+and `package-lock.json`, creates and pushes a `chore: release vX.Y.Z` commit and `vX.Y.Z` tag, and
+publishes the package to npm. The existing `prepublishOnly` guard runs the checks again immediately
+before publication, so a direct `npm publish` remains protected too. This workflow does not create
+a GitHub Release.
 
 ## License
 

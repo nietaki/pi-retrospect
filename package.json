@@ -35,6 +35,7 @@
     "src",
     "docs",
     "skills",
+    "CHANGELOG.md",
     "README.md"
   ],
   "pi": {
@@ -53,6 +54,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@release-it/keep-a-changelog": "^8.0.1",
     "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.0.3",
     "release-it": "^21.1.1",
