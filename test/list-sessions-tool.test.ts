@@ -38,13 +38,20 @@ const contextWithSessionFile = (sessionFile: string | undefined) =>
 /** Pi reports no session file, so nothing is current and nothing is excluded. */
 const NO_SESSION_FILE = contextWithSessionFile(undefined);
 
-/** The two members `src/index.ts` calls: it registers the tools and subscribes to input. */
-const fakeExtensionApi = (registered: Array<{ name: string; description: string }>) =>
+/** A registered tool, as far as these tests need to see one: `execute` included, so it can be called. */
+type RegisteredTool = { name: string; description: string; execute: typeof tool.execute };
+
+/** The members `src/index.ts` calls: it reads the effective settings, registers tools, subscribes. */
+const fakeExtensionApi = (
+  registered: RegisteredTool[],
+  getSettings: () => unknown = () => ({}),
+) =>
   ({
-    registerTool: (definition: { name: string; description: string }) => {
+    registerTool: (definition: RegisteredTool) => {
       registered.push(definition);
     },
     on: () => () => {},
+    getSettings,
   }) as unknown as ExtensionAPI;
 
 /** Pull the text out of a tool result without pretending the union is a text block. */
@@ -94,6 +101,13 @@ describe("list_sessions tool registration", () => {
   it("describes the current-session rule the caller cannot infer from the parameter name", () => {
     expect(tool.description).toContain("current session");
     expect(tool.description).toContain("includeCurrentSession");
+  });
+
+  it("describes the access bound the caller cannot widen", () => {
+    // The setting is not a parameter, so the only place a caller meets it is the description: that
+    // `cwds` selects within the operator's bound, and that an omitted bound changes nothing.
+    expect(tool.description).toContain("piRetrospect.allowedProjects");
+    expect(tool.description).toMatch(/can never widen it/);
   });
 });
 
@@ -199,9 +213,84 @@ describe("list_sessions current session", () => {
   });
 });
 
+/**
+ * The `piRetrospect.allowedProjects` boundary as the tool sees it.
+ *
+ * Pi cannot be asked for its effective settings while an extension factory is still running, and
+ * `/reload` replaces them afterwards, so the tool holds a reader rather than a value: it asks on
+ * every call, and a settings snapshot that cannot be read fails the call. Both halves of that are
+ * behavior a caller can see, and neither needs a real Pi.
+ */
+describe("list_sessions project access", () => {
+  it("never reads settings while the tool is being built", () => {
+    const readSettings = vi.fn(() => ({}));
+
+    createListSessionsTool({ sessionsRoot: FIXTURES, readSettings });
+
+    expect(readSettings).not.toHaveBeenCalled();
+  });
+
+  it("asks for the effective settings on every call, so a reload takes effect", async () => {
+    const snapshots = [{}, { piRetrospect: { allowedProjects: ["*"] } }];
+    const readSettings = vi.fn(() => snapshots.shift());
+    const gated = createListSessionsTool({ sessionsRoot: FIXTURES, readSettings });
+
+    await gated.execute("access-1", {}, undefined, undefined, NO_SESSION_FILE);
+    await gated.execute("access-2", {}, undefined, undefined, NO_SESSION_FILE);
+
+    expect(readSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails a call whose allowlist cannot be read, without naming what it holds", async () => {
+    const gated = createListSessionsTool({
+      sessionsRoot: FIXTURES,
+      readSettings: () => ({ piRetrospect: { allowedProjects: "/repo/hidden-project" } }),
+    });
+
+    const message = await gated
+      .execute("access-3", {}, undefined, undefined, NO_SESSION_FILE)
+      .then(() => "")
+      .catch((error: unknown) => (error as Error).message);
+
+    expect(message).toContain("piRetrospect.allowedProjects");
+    // The refusal says nothing about the settings, the sessions, or where either lives.
+    expect(message).not.toContain("hidden-project");
+    expect(message).not.toContain(FIXTURES);
+  });
+
+  it("re-decides which projects to report from the snapshot it reads on each call", async () => {
+    // The two halves meet here: a reader asked per call, and a listing that answers to the policy it
+    // returned. One tool instance, two effective settings, and no re-registration in between.
+    const snapshots = [{}, { piRetrospect: { allowedProjects: ["beta"] } }];
+    const gated = createListSessionsTool({ sessionsRoot: FIXTURES, readSettings: () => snapshots.shift() });
+
+    const unrestricted = structured(await gated.execute("access-5", {}, undefined, undefined, NO_SESSION_FILE));
+    const restricted = structured(await gated.execute("access-6", {}, undefined, undefined, NO_SESSION_FILE));
+
+    expect(new Set(unrestricted.sessions.map((session) => session.cwd))).toStrictEqual(
+      new Set(["/repo/alpha", "/repo/beta"]),
+    );
+    expect(new Set(restricted.sessions.map((session) => session.cwd))).toStrictEqual(new Set(["/repo/beta"]));
+    // The denied projects are gone, and so is everything the scan would have said about them: the
+    // committed fixtures hold their unreadable files inside the same directories.
+    expect(restricted.warnings).toStrictEqual([]);
+  });
+
+  it("lists the same sessions as the listing does when no settings reader was supplied", async () => {
+    // The default is the access that existed before the setting did, so a tool built the way the
+    // library is used directly keeps returning every discoverable session.
+    const ungated = createListSessionsTool({ sessionsRoot: FIXTURES });
+    const expected = await listSessions({}, { sessionsRoot: FIXTURES });
+
+    expect(structured(await ungated.execute("access-4", {}, undefined, undefined, NO_SESSION_FILE))).toStrictEqual(
+      expected,
+    );
+  });
+});
+
 describe("extension entry point", () => {
   it("registers list_sessions and session_entries", async () => {
-    const registered: Array<{ name: string; description: string }> = [];
+    const registered: RegisteredTool[] = [];
     const { default: extension } = await import("../src/index.ts");
 
     extension(fakeExtensionApi(registered));
@@ -212,5 +301,21 @@ describe("extension entry point", () => {
     ]);
     expect(typeof registered[0]?.description).toBe("string");
     expect(registered[0]?.description.length).toBeGreaterThan(0);
+  });
+
+  it("gives both tools the effective settings without reading them while it registers", async () => {
+    const registered: RegisteredTool[] = [];
+    // A malformed allowlist is the shape that proves the reader really is `pi.getSettings`: the only
+    // way a registered tool can fail on it is by having asked.
+    const getSettings = vi.fn(() => ({ piRetrospect: { allowedProjects: 42 } }));
+    const { default: extension } = await import("../src/index.ts");
+
+    extension(fakeExtensionApi(registered, getSettings));
+
+    expect(getSettings, "settings are unreadable while the factory runs").not.toHaveBeenCalled();
+
+    await expect(
+      registered[0]?.execute("entry-1", {}, undefined, undefined, NO_SESSION_FILE),
+    ).rejects.toThrow(/piRetrospect\.allowedProjects/);
   });
 });

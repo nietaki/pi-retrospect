@@ -11,10 +11,18 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 
 import { renderSessionEntriesContent } from "./content.ts";
 import { readSessionEntries } from "./session-entries.ts";
+import { readProjectAccessPolicy } from "./project-access.ts";
 import { SessionEntriesOutputSchema, SessionEntriesParamsSchema } from "./schemas.ts";
 
 export interface SessionEntriesToolOptions {
   sessionsRoot: string;
+  /**
+   * Reads Pi's effective settings, asked on every call. `src/index.ts` supplies `pi.getSettings`.
+   *
+   * Omit it — a factory test, or the reader used as a library — and there is no policy to read, so
+   * the tool keeps the access that existed before `allowedProjects` did.
+   */
+  readSettings?: () => unknown;
 }
 
 export function createSessionEntriesTool(options: SessionEntriesToolOptions) {
@@ -26,6 +34,11 @@ export function createSessionEntriesTool(options: SessionEntriesToolOptions) {
       "Takes one required parameter, sessionPath: an absolute path to a session .jsonl file under the",
       "sessions root, normally a path returned by list_sessions. Paths outside the root, relative paths,",
       "`..` traversals, and symlinks that leave the root throw, so this reads session files only.",
+      "Knowing a path is not permission to read it: when the operator configured",
+      "`piRetrospect.allowedProjects`, a restricted policy authorizes the transcript through the",
+      "top-level session that owns its directory — a nested run inherits its parent's project, and a",
+      "path no allowed session owns is refused with an error that names only the setting, never the",
+      "project or the file. Without that setting, root confinement is the whole rule.",
       "Line 1 is the session header and is never returned: entries start at line 2 and keep the file's",
       "own numbering, so a skipped line shifts nothing. The file is streamed, never read whole, and a",
       "line break is LF, CRLF, or a lone CR — plain `\\n` counting for every file Pi writes. Entries",
@@ -80,8 +93,15 @@ export function createSessionEntriesTool(options: SessionEntriesToolOptions) {
     annotations: { readOnlyHint: true },
 
     async execute(_toolCallId, params, signal) {
+      // Asked per call, never cached, for the same reason `list_sessions` asks for the session file
+      // per call: the effective settings change inside one Pi process, and `/reload` is what picks up
+      // an edited allowlist. A policy this call cannot read fails the call before any file is opened
+      // rather than falling back to the wide-open access its typo was meant to prevent.
+      const policy = readProjectAccessPolicy(options.readSettings);
+
       const output = await readSessionEntries(params, {
         sessionsRoot: options.sessionsRoot,
+        policy,
         signal,
       });
 

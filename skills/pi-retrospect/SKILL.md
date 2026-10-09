@@ -19,9 +19,10 @@ how a task was handled before.
 - `session_entries` reads entries from one transcript and supports narrowing
   them to the parts relevant to the task.
 
-Both tools are read-only. See [`docs/tool-api.md`](../../docs/tool-api.md) for
-the complete parameters, result schemas, filtering semantics, examples, and
-limitations.
+Both tools are read-only, and both answer to the operator's `piRetrospect.allowedProjects` bound on
+which session projects may be reached at all. See
+[`docs/tool-api.md`](../../docs/tool-api.md) for the complete parameters, result schemas, filtering
+semantics, examples, and limitations.
 
 ## Recommended workflow
 
@@ -37,7 +38,9 @@ limitations.
    requirements for presenting or forwarding findings.
 
 Check `warnings` when the task depends on completeness. An empty result with
-warnings can mean unreadable history rather than no history.
+warnings can mean unreadable history rather than no history. An empty result with *no* warnings can
+also mean the access bound rather than no history — see
+[Which projects a call may reach](#which-projects-a-call-may-reach).
 
 ## Investigating steering messages
 
@@ -62,6 +65,26 @@ never rewritten. See [`docs/tool-api.md`](../../docs/tool-api.md#marking-steerin
 for the complete marking rules.
 
 ## Important distinctions
+
+### Which projects a call may reach
+
+The operator can restrict both tools to a list of project basenames — the last segment of the working
+directory a session ran in — with `piRetrospect.allowedProjects`. That bound is configuration, not a
+parameter: `cwds`, `cwdMatch`, and a `sessionPath` you guessed or were told all select within it and
+cannot widen it. Read the consequences as:
+
+- a `list_sessions` result never mentions what the bound dropped, so `sessions: []` with no warnings
+  does not prove the history is absent — it may only prove you are not allowed to see it;
+- `session_entries` refuses an unauthorized transcript by throwing, not by returning an empty page, and
+  its message names the setting rather than the path or project, so a refusal tells you nothing about
+  whether the file exists;
+- do not respond to either signal by probing other paths, other project names, or another machine's
+  directory layout: that is the behavior the bound exists to stop, and it will not succeed.
+
+A nested transcript is authorized by the project of the top-level session that owns it, so a delegated
+run whose own `cwd` names some other directory is reachable when its parent is. And because a project's
+own settings can replace a restrictive user-level list, the bound reflects the configuration Pi merged,
+not only what the user-level file says.
 
 ### The session you are in
 

@@ -19,6 +19,10 @@
  * bytes on the next open — plus one file-level `legacy_version` warning, and `lineNo` stays the only
  * address that resolves twice. The stored values remain visible in `raw`.
  *
+ * Root confinement decides which files this can name at all; `options.policy` decides which of them it
+ * may open. Both are asked before the file is read, and both answer without describing what they
+ * refused: a guessed path inside a restricted project learns only that the policy exists.
+ *
  * Contract: docs/tool-api.md
  */
 
@@ -30,6 +34,10 @@ import type { JsonObject } from "@earendil-works/pi-ai";
 import { parseSessionInstant } from "./timestamps.ts";
 import { buildEntryQuery } from "./entry-query.ts";
 import { entryText } from "./entry-text.ts";
+import { isProjectAllowed, projectAccessDeniedError, UNRESTRICTED_POLICY } from "./project-access.ts";
+import type { ProjectAccessPolicy } from "./project-access.ts";
+import { topLevelSessionOf } from "./session-layout.ts";
+import { readSessionHeader } from "./session-metadata.ts";
 import type {
   SessionEntriesOutput,
   SessionEntriesParams,
@@ -42,6 +50,15 @@ export interface SessionEntriesOptions {
   sessionsRoot: string;
   /** Checked before the file is opened, and again for every line read, so an abort stops the scan. */
   signal?: AbortSignal;
+  /**
+   * Which session projects a direct read may reach, read from the caller's effective settings.
+   *
+   * This is what closes the direct-path bypass: naming a transcript is not permission to read it, so a
+   * restricted policy is answered by the top-level session that owns the transcript's directory, and a
+   * child's own cwd never overrules that answer. Omit it — the reader used as a library, or an operator
+   * who configured no bound — and root confinement is the whole rule, exactly as before.
+   */
+  policy?: ProjectAccessPolicy;
 }
 
 /** Session format versions before this one carry no `id`/`parentId` on their entries. */
@@ -70,8 +87,14 @@ function within(container: string, path: string): boolean {
  * spelling. A path that cannot be resolved is still reported by where it claims to be — outside the
  * root as a containment failure, inside it as a read failure — because the realpath of a missing
  * file says nothing about which of the two the caller got wrong.
+ *
+ * The resolved root comes back with the file, because the access policy asks where the file sits
+ * inside it, and both sides of that question have to be settled by the same `realpath`.
  */
-async function resolveSessionPath(sessionPath: unknown, sessionsRoot: string): Promise<string> {
+async function resolveSessionPath(
+  sessionPath: unknown,
+  sessionsRoot: string,
+): Promise<{ file: string; root: string }> {
   if (typeof sessionPath !== "string" || sessionPath === "") {
     throw new TypeError("sessionPath must be a non-empty string");
   }
@@ -100,7 +123,40 @@ async function resolveSessionPath(sessionPath: unknown, sessionsRoot: string): P
 
   if (!within(root, file)) throw escape();
 
-  return file;
+  return { file, root };
+}
+
+/**
+ * Throw unless `policy` admits the project that contains `file`.
+ *
+ * The answer comes from the containing top-level session, read through the same header validation
+ * `list_sessions` uses, because a nested transcript is permitted by its parent's project and not by
+ * whatever cwd its own header happens to carry. A parent whose header cannot be read cannot be placed
+ * in any project, so a restricted policy refuses it; an unrestricted policy never asks, and leaves the
+ * file's own header line to say what it is, which is the behavior from before the setting existed.
+ *
+ * The refusal is the generic one. A caller who guessed a path inside a restricted project learns only
+ * that the policy exists, never which project the path belongs to or whether it was found.
+ */
+async function authorizeTranscript(
+  file: string,
+  root: string,
+  policy: ProjectAccessPolicy,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (policy.mode === "unrestricted") return;
+
+  throwIfAborted(signal);
+
+  if (policy.mode === "deny-all") throw projectAccessDeniedError();
+
+  const parent = topLevelSessionOf(file, root);
+  if (parent === undefined) throw projectAccessDeniedError();
+
+  const header = await readSessionHeader(parent);
+  if (!header.ok) throw projectAccessDeniedError();
+
+  if (!isProjectAllowed(policy, header.values.cwd)) throw projectAccessDeniedError();
 }
 
 type HeaderInfo = { ok: true; version: number } | { ok: false; reason: string };
@@ -284,8 +340,14 @@ function toEntry(
  *
  * Throws when a filter parameter is unusable (before the file is opened, so a bad bound cannot look
  * like a missing session), when `sessionPath` is not an absolute path inside the sessions root, when
- * the file cannot be read, and when line 1 is not a session header: those mean the caller did not
- * name a readable Pi session, which no amount of returned entries would fix.
+ * `options.policy` does not admit the project that owns the transcript, when the file cannot be read,
+ * and when line 1 is not a session header: those mean the caller did not get to read a Pi session,
+ * which no amount of returned entries would fix. The policy refusal is the one that says nothing about
+ * what it refused.
+ *
+ * A policy denial is not an empty result. `entries: []` would look like a session with nothing in it,
+ * and a caller that can guess a path can then test which guesses come back empty — the distinction
+ * between "not permitted" and "nothing there" is exactly what an allowlist is for.
  */
 export async function readSessionEntries(
   params: SessionEntriesParams,
@@ -297,7 +359,12 @@ export async function readSessionEntries(
   // confinement failure and a missing file.
   const query = buildEntryQuery(params);
 
-  const path = await resolveSessionPath(params.sessionPath, options.sessionsRoot);
+  const { file, root } = await resolveSessionPath(params.sessionPath, options.sessionsRoot);
+
+  // Confinement first, then the operator's bound, and only then the file: a path that is not under the
+  // root was never the policy's to judge, and a path that is under it is refused here rather than
+  // opened and read.
+  await authorizeTranscript(file, root, options.policy ?? UNRESTRICTED_POLICY, options.signal);
 
   const warnings: SessionEntriesWarning[] = [];
   const entries: SessionFileEntry[] = [];
@@ -308,7 +375,7 @@ export async function readSessionEntries(
   let addressable = false;
   let headerRead = false;
 
-  for await (const { lineNo, line } of readSessionLines(path, options.signal)) {
+  for await (const { lineNo, line } of readSessionLines(file, options.signal)) {
     if (lineNo === 1) {
       const header = inspectHeaderLine(line);
 
