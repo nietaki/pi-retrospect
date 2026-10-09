@@ -141,23 +141,32 @@ const fakeExtensionApi = (settings: () => unknown) => {
 };
 
 describe("extension entry point", () => {
-  it("marks steering through the handler it registers on Pi", async () => {
-    const { api, handlers, getSettings } = fakeExtensionApi(markingEnabled);
-    const { default: extension } = await import("../src/index.ts");
+  // The timeout is this test's, not the assertion's. It is the first test in the suite that reaches
+  // `src/index.ts` at runtime — every other file imports a tool factory statically and so has Pi's
+  // graph loaded before a test runs — and that first import is a cold transform of Pi and both tools
+  // that costs seconds, not milliseconds, and does not scale with this machine's load. Under the
+  // default 5s per-test budget the suite fails according to how busy the run is.
+  it(
+    "marks steering through the handler it registers on Pi",
+    async () => {
+      const { api, handlers, getSettings } = fakeExtensionApi(markingEnabled);
+      const { default: extension } = await import("../src/index.ts");
 
-    extension(api);
+      extension(api);
 
-    expect(handlers, "the extension registers exactly one input handler").toHaveLength(1);
-    // Pi's settings are not readable while a factory is loading, so registration must not read them.
-    expect(getSettings).not.toHaveBeenCalled();
+      expect(handlers, "the extension registers exactly one input handler").toHaveLength(1);
+      // Pi's settings are not readable while a factory is loading, so registration must not read them.
+      expect(getSettings).not.toHaveBeenCalled();
 
-    expect(handlers[0]!(steering())).toStrictEqual({
-      action: "transform",
-      text: "STEERING: that is not what I meant",
-      images: undefined,
-    });
-    expect(getSettings).toHaveBeenCalledTimes(1);
-  });
+      expect(handlers[0]!(steering())).toStrictEqual({
+        action: "transform",
+        text: "STEERING: that is not what I meant",
+        images: undefined,
+      });
+      expect(getSettings).toHaveBeenCalledTimes(1);
+    },
+    20_000,
+  );
 
   it("leaves steering unmarked when Pi's effective settings do not enable it", async () => {
     const { api, handlers } = fakeExtensionApi(() => ({}));
