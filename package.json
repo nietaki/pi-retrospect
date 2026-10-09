@@ -1,6 +1,6 @@
 {
   "name": "pi-retrospect",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Tools to explore past Pi sessions to facilitate harness self-improvement",
   "type": "module",
   "license": "MIT",

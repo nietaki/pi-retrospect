@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-09
+
 ### Added
 
 - Restrict session discovery and transcript reads to projects allowed by the
@@ -43,7 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release with session discovery and browsing, including session
   metadata and summaries.
 
-[Unreleased]: https://github.com/nietaki/pi-retrospect/compare/v0.3.0...master
+[Unreleased]: https://github.com/nietaki/pi-retrospect/compare/v0.4.0...master
+[0.4.0]: https://github.com/nietaki/pi-retrospect/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nietaki/pi-retrospect/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nietaki/pi-retrospect/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nietaki/pi-retrospect/releases/tag/v0.1.0
