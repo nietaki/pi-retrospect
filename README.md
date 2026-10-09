@@ -11,8 +11,9 @@ workflows.
 
 The package provides two read-only tools for discovering recorded sessions and
 inspecting their entries. It also includes a skill that guides agents through
-retrospective analysis and an optional setting that makes steering corrections easier
-to find later.
+retrospective analysis, an optional setting that makes steering corrections easier
+to find later, and an optional setting that bounds which projects those tools may
+read at all.
 
 > **Status:** `pi-retrospect` is an early 0.x package. Its session-discovery and
 > transcript-reading tools are implemented and usable, but broader capabilities such
@@ -63,7 +64,7 @@ matching parent always arrives with its complete subagent tree:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `cwds` | all working directories | Absolute `cwd`s to keep. |
+| `cwds` | all working directories | Absolute `cwd`s to keep, within the projects the operator allowed. |
 | `cwdMatch` | `"exact"` | `"sibling-prefix"` also keeps sibling directories whose basename extends the requested one — the shape of git worktrees placed next to the main checkout (a lexical path rule; no git metadata is read). |
 | `includeCurrentSession` | `false` | Keep the session this call runs inside. By default it is dropped, with the transcripts nested under it, before filtering, sorting, and `limit` — a retrospective normally means earlier sessions. Pi names it by its session file, never by id, so a copy of it survives; an ephemeral session has no file and so excludes nothing. |
 | `startTimestamp`, `endTimestamp` | unbounded | Inclusive ISO 8601 bounds, read in the **host timezone**: a bare date is one whole calendar day, and a date-time with no offset is local to the machine running the tool. |
@@ -106,7 +107,8 @@ never reach `text`; they are still in `raw`. Line 1 is the session header and is
 malformed line costs a warning without shifting the lines after it. Unknown entry types and unknown
 message roles come back verbatim, and the call cannot leave the sessions root — a relative path, a
 `..` traversal, a symlink that resolves outside it, and a file whose first line is not a session
-header all throw.
+header all throw. When `piRetrospect.allowedProjects` is configured it also cannot reach a project
+outside that list, whichever path it is handed.
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
@@ -170,6 +172,50 @@ the model's context view. In a session file older than version 2, `id` and `pare
 even where the line stores them — Pi
 replaces every id when it migrates such a file — and one `legacy_version` warning says so; `lineNo`
 is the handle that stays valid, and `raw` keeps what was written.
+
+## Restricting session access
+
+Past sessions belong to every project that ever ran Pi on the machine, and an agent chooses what to ask
+for by naming working directories and transcript paths. `piRetrospect.allowedProjects` is the operator's
+answer to that: an upper bound the package enforces itself, on both tools, that no parameter of a call
+can widen.
+
+Set it in the user-level `~/.pi/agent/settings.json`, or in a trusted project's `.pi/settings.json`,
+which Pi merges over the user value:
+
+```json
+{
+  "piRetrospect": {
+    "allowedProjects": ["payments-service", "internal-tools"]
+  }
+}
+```
+
+The values are project **basenames** — the last segment of the working directory a session ran in — not
+paths, so a committed configuration means the same thing on every machine that holds those checkouts.
+An allowed name covers that project and every sibling whose
+name continues it with a dash — `payments-service` also admits `payments-service-issue-4`, and admits
+`payments-service-archive` just as readily, because the rule matches the shape a linked worktree
+conventionally has rather than any Git metadata. A name that merely runs on, like `payments-services`,
+is refused, and matching is case-sensitive.
+
+Only the name is compared, so this bound decides *which project names* are reachable rather than which
+directories: two unrelated checkouts both named `payments-service` are one project to it.
+
+Leaving the setting out keeps every project reachable, which is the behavior of every install that
+predates it, and `["*"]` says the same thing out loud. An explicit `[]` denies every project. A value
+the package cannot read as a list of project names fails the call instead of quietly becoming no
+restriction, and a refusal never repeats the path or project it refused.
+
+One consequence is worth stating plainly: because Pi merges project settings over user settings, a
+project can replace a restrictive list with `["*"]` and reach everything again. That is intentional — a
+trusted project is meant to be able to audit all sessions — and it means the bound is only as strong as
+the configuration Pi has merged. Treat a repository whose settings you would not trust as one that can
+widen this, not as one that is contained by it.
+
+After editing settings, run `/reload`. The complete semantics, both failure messages, and the exact
+enforcement in each tool are in
+[`docs/tool-api.md`](docs/tool-api.md#restricting-session-access).
 
 ## Steering-message markers
 
@@ -239,7 +285,8 @@ rewritten, and disabling the setting does not remove markers already stored. The
 - [`docs/tool-api.md`](docs/tool-api.md) — the contract for the operations this
   package exposes: `list_sessions` (discovery rules, filters, ordering, guarantees) and
   `session_entries` (sessions-root confinement, line addressing, entry filters, the literal
-  `text` search, the `text` projection, `raw`, warning codes).
+  `text` search, the `text` projection, `raw`, warning codes), plus the
+  `piRetrospect.allowedProjects` access bound and the `markSteeringMessages` marker.
 - `test/fixtures/generate.mjs` (source repository, not in the npm tarball) — rebuilds
   the synthetic session tree the tests run against.
 

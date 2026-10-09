@@ -184,6 +184,8 @@ export interface ListSessionsOptions {
   signal?: AbortSignal;
   /** Absolute session file of the session the caller runs inside, from the host. */
   currentSessionPath?: string;
+  /** Which session projects the scan may report; unrestricted when omitted. */
+  policy?: ProjectAccessPolicy;
 }
 
 export async function listSessions(
@@ -225,6 +227,22 @@ dialects of the same word:
 reversed range fails on an unreadable root rather than returning `sessions: []` plus a
 warning: a caller's typo must not look like absent history.
 
+Two more modules exist because both operations need the same answer, and one of them is a
+boundary rather than a convenience:
+
+- `src/project-access.ts` — the only reading of `piRetrospect.allowedProjects`. It turns an `unknown`
+  settings snapshot into one of three policies (`unrestricted`, `deny-all`, or an allowlist of project
+  basenames), answers whether a cwd's project is allowed, and fails closed on anything it cannot read.
+  Both tools call it through `readProjectAccessPolicy(readSettings)`, which is what keeps one setting
+  from acquiring two interpretations, and every policy failure carries one fixed sentence that names
+  the setting and no path. It reads no filesystem and no Pi: the settings reader is a dependency of the
+  tool layer, not of this module.
+- `src/session-layout.ts` — Pi's storage shape in path arithmetic, shared by the walk that reports
+  sessions and the check that decides who may open one: the `--<slug>--` project pattern, the `.jsonl`
+  and `session.jsonl` names, `containerOf(path)`, and `topLevelSessionOf(file, root)`. Neither operation
+  re-declares it, because the pair disagreeing would mean one tool reports a session the other cannot
+  place — or the reverse.
+
 The registered wrapper supplies the root. Pi's `getSessionsDir()` is **not** re-exported
 from the package root; `getAgentDir()` is, and it honors the agent-dir environment
 override. So `src/index.ts` computes:
@@ -237,8 +255,15 @@ const sessionsRoot = join(getAgentDir(), "sessions");
 ```
 
 The `"sessions"` literal is the only path component we hardcode. The tool itself is built
-by a factory — `createListSessionsTool({ sessionsRoot })` in `src/list-sessions-tool.ts` —
+by a factory — `createListSessionsTool({ sessionsRoot, readSettings })` in `src/list-sessions-tool.ts` —
 so tests can construct the registered shape against a fixture root instead of the live store.
+
+`readSettings` is the other injected dependency, and the same one the steering handler takes: Pi's
+effective settings are unreadable while an extension factory is still running, and `/reload`, a project
+change, or a new session replaces them inside one process, so `execute()` asks the reader on every call
+and caches nothing. `src/index.ts` supplies `() => pi.getSettings()` to both tools. A factory built
+without a reader has no policy to read, which is what lets the core operations and the factory tests
+keep the unrestricted behavior of an install that never configured the setting.
 
 `execute()` checks the `AbortSignal` between file reads and stops early; `details`
 mirrors `structuredContent`; `outputSchema` is declared so codemode callers receive JSON
@@ -256,7 +281,7 @@ layer with the other row rules.
 
 ### `session_entries` boundary
 
-`src/session-entries.ts` exports `readSessionEntries(params, { sessionsRoot, signal })`;
+`src/session-entries.ts` exports `readSessionEntries(params, { sessionsRoot, signal, policy })`;
 `src/session-entries-tool.ts` is the factory-wrapped tool, same shape as the listing. Confinement,
 header checks, and line mapping live in that one module; the filter and cap parameters live in
 `src/entry-query.ts`, which the reader calls **before** it resolves the path — a nonsense bound is
@@ -294,7 +319,9 @@ result is bounded by the rows it keeps rather than by the file's size, which is 
 `raw` problem this feature answers. The other half (a 2 MB single entry) is not answered: there is
 no per-row budget. See TODOs.
 
-**Confinement** (`resolveSessionPath`) is the only security-relevant rule:
+**Confinement** (`resolveSessionPath`) is the first security-relevant rule, and **project access**
+(`authorizeTranscript`) is the second. Confinement answers *where may this read go at all*; access
+answers *which projects the operator allowed it to see*. Confined in that order:
 
 1. `sessionPath` must be a non-empty string and `isAbsolute`. Nothing is resolved against the
    process cwd, so the same call means the same file from any directory a script happens to sit in.
@@ -312,6 +339,26 @@ no per-row budget. See TODOs.
    after step 3 cannot redirect this read. A target swapped after resolution is not defended (no
    `O_NOFOLLOW`), which is the residual window; it only matters against a concurrent writer inside the
    operator's own sessions root, which is not the threat this confinement exists for.
+
+**Project access** then asks the policy, after confinement and before the file is opened:
+
+- An `unrestricted` policy returns without a second thought, so an install that never configured the
+  setting performs no extra filesystem work and keeps reading any confined file whose own line 1 is a
+  session header — including shapes discovery would never report.
+- `deny-all` refuses everything, and an allowlist resolves the requested transcript to its containing
+  top-level session with `topLevelSessionOf()`, reads that session's header through the same
+  `readSessionHeader` the listing uses, and asks `isProjectAllowed` about **that** cwd. A delegated run
+  is therefore reached through its parent's project and never through its own header's cwd, which is
+  the inheritance `list_sessions` already reports as a whole nested tree.
+- Nothing to authorize is a refusal, not an omission: a file at the root itself, a file under a
+  directory that is no session's container, and a top-level parent whose header cannot be read all fail
+  closed, because none of them can be placed in a project the operator permitted.
+- Every refusal is `projectAccessDeniedError()`, whose message names the setting and carries no path.
+  A refusal that echoed the path would confirm the guess, and the guess is what this rule answers.
+
+The header of the *requested* file is still validated by the reader's own weaker `inspectHeaderLine`
+after authorization: authorization decides whose project a transcript is in, not what format the file
+claims.
 
 **Header check** (`inspectHeaderLine`) is deliberately weaker than `validateHeaderLine` in
 `src/session-metadata.ts`, which the listing uses. The listing returns `id`, `cwd`, and `timestamp`,
@@ -388,18 +435,26 @@ mid-map rather than only before or after it.
 1. **Project directories:** only immediate subdirectories of the root whose name matches
    `--<slug>--`. Other entries — the live store holds `permission-forwarding/` — are ignored by
    rule, not by accident.
-2. **Top-level sessions:** `*.jsonl` files *directly* inside a project directory. Not a
+2. **Access bound:** a validated top-level header is asked of `options.policy` before its container is
+   walked. A denied session produces no row, so its children are never read and cannot appear as
+   nested metadata or as warnings. Unreadable files in the same directory are deferred to the end of
+   the directory and reported only when that directory also held something permitted: a directory whose
+   every valid session was denied has been *established* as a project the caller may not see, so its
+   paths go unreported, while a directory with no valid header at all was never established as anything
+   and keeps its warnings. That is the deliberate half-line: suppressing corruption warnings without a
+   denied project behind them would hide real damage to win nothing.
+3. **Top-level sessions:** `*.jsonl` files *directly* inside a project directory. Not a
    recursive search, which keeps `subagent-artifacts/*_transcript.jsonl` copies (only a
    handful exist in the live store, but they duplicate real children) out of the result
    set: they are neither roots (not directly in a project dir) nor children (not under a
    parent-stem directory).
-3. **Children of a session:** every `session.jsonl` at any depth under a directory named
+4. **Children of a session:** every `session.jsonl` at any depth under a directory named
    after the session's own stem — `<file-timestamp>_<session-id>`, the parent filename with
    `.jsonl` removed. Today the observed shape is exactly
    `<slug>/<parent-stem>/<launch-uuid>/run-<n>/session.jsonl`.
-4. **One entry per run directory.** A launch slot holding `run-0`, `run-1`, … produces one
+5. **One entry per run directory.** A launch slot holding `run-0`, `run-1`, … produces one
    `SessionMetadata` per transcript; we do not collapse a resumed child into a single entry.
-5. **Grouping by deepest container.** A session's container directory is
+6. **Grouping by deepest container.** A session's container directory is
    `dirname(path)/basename-without-.jsonl`. Every transcript found under a root's container
    is attached to the session whose container is the deepest ancestor of its path, so a
    transcript is never reported under two parents. When a nested launch does not sit under
@@ -407,13 +462,13 @@ mid-map rather than only before or after it.
    documented fallback for the unverified grandchild convention. Recursion is implemented
    generically and unverified: the live store holds no grandchild transcripts at
    all, and every child transcript observed sits at depth `run-0`. See TODOs.
-6. **Header read:** only line 1 of each file is parsed, bounded to **4 KiB**
+7. **Header read:** only line 1 of each file is parsed, bounded to **4 KiB**
    (`MAX_HEADER_LINE_BYTES = 4096`). A longer first line is skipped with a warning. This is
    deliberately tighter than Pi's own 1 MiB `MAX_SESSION_HEADER_SCAN_BYTES`: live-store
    headers are ~150 bytes, and a header over 4 KiB is not a session we can trust.
    A line of exactly 4096 bytes is accepted; a file whose last line has no terminating
    newline is read normally.
-7. **Symlinks are not followed.** Discovery stays inside `sessionsRoot`. Implemented by
+8. **Symlinks are not followed.** Discovery stays inside `sessionsRoot`. Implemented by
    `Dirent.isDirectory()` / `isFile()`, which are false for symlinks.
 
 ### Validation rules
@@ -436,7 +491,9 @@ an enum.
 Consequence: every returned row is fully trustworthy — `id`, absolute `path`, valid `cwd`,
 and a parseable `timestamp` are guaranteed, so callers never handle a partial row and
 sorting never meets an `Invalid Date`. Nothing the walk reached is ever silently dropped; a
-skipped file costs one warning entry. Files the discovery rules exclude (non-slug
+skipped file costs one warning entry — with the one exception the access bound introduces, where a
+whole established project is dropped without a word, because saying so would be the leak. Files the
+discovery rules exclude (non-slug
 directories, `subagent-artifacts/` copies, orphaned stems, symlinks) are not skipped and
 therefore not warned about — they are out of scope.
 
@@ -468,7 +525,9 @@ because a parent's runs must read in launch order. Sorting therefore happens twi
 both because the sessions root is resolved with `path.resolve()` before the walk.
 
 `warnings` are sorted by `path` (then `reason`) so a run is reproducible regardless of
-`readdir` order, and they are never filtered: they describe the scan, not the kept subset.
+`readdir` order, and they are never filtered: they describe the scan, not the kept subset. An
+access-bound denial is the one exception, because the denied subtree was never part of the scan the
+caller is entitled to: its files appear in neither `sessions` nor `warnings`.
 
 ### Filter rules
 
@@ -554,7 +613,12 @@ defineTool({
 });
 ```
 
-`src/index.ts` registers both against the same `join(getAgentDir(), "sessions")` root. The
+`src/index.ts` registers both against the same `join(getAgentDir(), "sessions")` root and hands both the
+same `() => pi.getSettings()` reader, so one call sees one effective policy. The policy is evaluated in
+`execute()`, never while the tools are being built: settings are unreadable that early, and a cached
+snapshot would keep enforcing the last `/reload`.
+
+The
 `session_entries` description must keep stating what a caller cannot infer from the parameter
 names alone: that the path is confined to the sessions root, that line 1 is the header and is never
 returned, that `raw` is the whole line and can be megabytes, that `text` is a projection rather than a
@@ -567,7 +631,9 @@ bash run's output), that a null `text` is never a hit, and that a `system` row's
 prompt — the hits a caller does not expect from a word like "tool".
 
 The registered `description` must keep telling the caller what it cannot infer from the
-shape: that the default order is oldest-first so `sessions.at(-1)` is the newest, that
+shape: that an access bound the caller did not choose decides which projects are reachable at all, and
+that `cwds` selects within it rather than widening it, that the default order is oldest-first so
+`sessions.at(-1)` is the newest, that
 filters and ordering act on top-level sessions while children arrive whole and in launch
 order, that a date-only `endTimestamp` means the whole day in the host timezone, that `sibling-prefix` is a
 path heuristic rather than git detection, that nesting is expressed by `subagentSessions`
@@ -646,6 +712,20 @@ session-file link), an orphan stem directory with no matching parent file, a hea
 exactly 4096 bytes and one of 4097, a header with no terminating newline, and one
 deliberately broken file per warning branch. Fixture headers are hand-written; no real
 session data is committed.
+
+The access bound has its own three files, because it is a policy rather than a parameter:
+`test/project-access.test.ts` (the reading of the setting: the three shapes, the basename and
+sibling-prefix rule, case sensitivity, every malformed shape, and that a failure message carries no
+path), `test/list-sessions-policy.test.ts` (what discovery may report: each mode, a denied project's
+missing warnings, the unclassifiable-directory exception, nested inheritance, and that caller filters
+still only narrow), and `test/session-entries-policy.test.ts` (what a direct read may open: denied
+parents and children, an allowed parent's child whose own cwd names a different project, guessed
+paths, the shapes no session owns, symlinks followed to the project their bytes live in, and unchanged
+streaming after authorization). The per-tool settings boundary — read per call, never at construction,
+malformed policy fails without path-bearing output — is asserted in the two `*-tool.test.ts` files. Each
+writes its own scratch store under `test/tmp/policy/` and `test/tmp/session-entries-policy/` rather
+than adding rows to `test/fixtures/sessions/`, which the whole-store counts in
+`test/list-sessions.test.ts` depend on.
 
 Assertions target the contract, not Pi's format: ordering, absolute paths, nesting by
 containment, one row per run directory, symlink and non-slug exclusion, warning coverage,

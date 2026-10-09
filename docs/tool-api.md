@@ -9,8 +9,12 @@ It can also mark steering messages as they are submitted so later retrospective 
 likely corrections and misunderstandings. The marker is opt-in; the tools remain read-only whether or
 not it is enabled.
 
+Both tools can be bounded by one operator setting, `piRetrospect.allowedProjects`, which decides which
+session projects either tool may reach at all. It is enforced by the extension rather than by the
+parameters a caller chooses. See [Restricting session access](#restricting-session-access).
+
 This document is the caller reference: it defines parameters, result fields, behavior that affects
-correct use, the steering-message setting, and common workflows. Implementation details and
+correct use, the two settings, and common workflows. Implementation details and
 maintainer-oriented analysis live in [`maintainer-reference.md`](maintainer-reference.md).
 
 ## Calling the tools
@@ -44,6 +48,120 @@ one is dropped before `limit` applies. See
 
 Avoid returning complete entries or `raw` values unless the task needs them. Transcript rows can be
 large, while a codemode script can retain only the relevant fields.
+
+## Restricting session access
+
+Which sessions exist under the sessions root is a fact about every project that ever ran Pi, and a
+caller chooses what to look at by naming `cwds` and paths. `piRetrospect.allowedProjects` is the
+operator's answer to that: an upper bound the **extension** enforces on both tools, which no parameter
+of a call can widen.
+
+Add it to the user-level `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json`:
+
+```json
+{
+  "piRetrospect": {
+    "allowedProjects": ["payments-service", "internal-tools"]
+  }
+}
+```
+
+Values are project **basenames** — the final segment of a session's working directory — rather than
+absolute paths, so one committed configuration means the same thing on every machine that holds those
+checkouts.
+
+### What the list means
+
+| Configuration | Effect |
+| --- | --- |
+| Omitted: no namespace, no key, or a key holding nothing | Every project is reachable — the behavior from before the setting existed. |
+| `["*"]`, alone or beside named projects | Every project is reachable. The exact `"*"` is read as the wildcard before anything else. |
+| `[]` | No project is reachable. An empty list is a decision, not an absent one. |
+| `["bar", "baz"]` | Only sessions whose project basename is `bar` or `baz`, or a `-`-suffixed sibling of one of them. |
+| Anything else: a value that is not a list, an item that is not a string, an empty item, or an item holding a path separator or reading as `.` or `..` | Both tools throw. A bound that cannot be read is never read as no bound. |
+| Effective settings that the tool cannot read on a call | The same throw. A tool that cannot ask what is allowed does not assume that everything is. |
+
+Matching is lexical and case-sensitive on the basename, and no parent directory is consulted:
+`bar` admits `/Users/me/bar` and the adjacent worktree `/Users/me/bar-issue-7`, and refuses
+`/Users/me/barista` and `/Users/me/Bar`. A trailing separator changes nothing
+(`/Users/me/bar/` is `bar`), and nothing is resolved against the filesystem, so the same
+configuration answers the same way wherever it is read.
+
+### What the bound covers
+
+- `list_sessions` reports no session, no nested transcript, and no warning from a denied project. The
+  bound is asked of each validated header while discovering, before that session's child transcripts
+  are walked, so a denied tree never becomes observable metadata.
+- `session_entries` authorizes a directly addressed transcript through the **top-level session that
+  owns its directory**. A delegated run is therefore readable when its parent's project is allowed,
+  whatever cwd the run's own header carries — and a path no allowed top-level session owns is refused,
+  including a path that was guessed rather than returned by `list_sessions`.
+- `cwds` and `cwdMatch` select which *permitted* sessions to return and cannot widen the bound: a
+  filter naming a denied project yields nothing.
+- Sessions-root confinement still applies first and independently. A path outside the root is the
+  confinement failure it has always been, configured bound or not.
+
+Both refusals name the setting and nothing else, so a failed call cannot confirm which project it
+refused, which path existed, or how many sessions were skipped:
+
+| Failure | Thrown message |
+| --- | --- |
+| `allowedProjects` cannot be read as a policy, or the effective settings cannot be read | `piRetrospect.allowedProjects is not a valid project allowlist` |
+| A transcript's project is not allowed | `session is outside the projects allowed by piRetrospect.allowedProjects` |
+
+A denial is never an empty result. `session_entries` throws; `list_sessions` returns the sessions the
+bound does allow, and describes nothing about the ones it dropped.
+
+### Reloading and project override
+
+The bound is read from Pi's effective settings on **every** call, so `/reload` picks up an edit without
+restarting Pi, and nothing is cached while the extension loads.
+
+Pi merges project settings over user settings, and `allowedProjects` is replaced rather than
+intersected: a project that configures `["*"]` widens a restrictive user policy back to everything.
+That is deliberate — a trusted project is expected to be able to inspect all sessions — and it means
+the bound is only as strong as the settings Pi has merged. `allowedProjects` is not protection against
+a repository whose configuration you would not trust.
+
+### Compact example
+
+```js
+// Settings: { "piRetrospect": { "allowedProjects": ["payments-service"] } }
+
+// A filter cannot reach past the bound: nothing from that project is returned, and nothing is
+// said about it. `warnings` says nothing about a denied project either, though unrelated warnings
+// from projects this call may see still appear.
+const denied = await tools.list_sessions({ cwds: ["/Users/me/internal-tools"] });
+// → denied.sessions is []
+
+// An allowed project still behaves as before, and its `-`-suffixed siblings come with it.
+const { sessions } = await tools.list_sessions({
+  cwds: ["/Users/me/payments-service"],
+  cwdMatch: "sibling-prefix",
+});
+// → `/Users/me/payments-service`, `/Users/me/payments-service-issue-4`, and any other sibling
+//   whose name continues it with a dash
+```
+
+### Limitations
+
+- Basenames are compared, not paths, so two different checkouts both named `api` are one project to
+  this rule — `/Users/me/api` and `/tmp/api` are the same answer. Configure a name that identifies the
+  project you mean and nothing else.
+- A `-`-suffixed sibling is admitted because of its **name**, not because Git made it a worktree, so
+  `payments-service-archive` and `payments-service-scratch` are reachable whenever `payments-service`
+  is. The rule is deliberately the same shape `cwdMatch: "sibling-prefix"` already uses, which is a
+  naming convention rather than a fact about the repository.
+- A file whose own header cannot be read has no trustworthy cwd. Its warning disappears only when the
+  directory it sits in was already established as a denied project; a directory holding nothing but
+  unreadable files was never established as anything, so it keeps warning, because suppressing that
+  would hide unrelated corruption to win nothing. A project directory that cannot be listed at all is
+  the same case: nothing was established about it.
+- A transcript under the root that no discoverable top-level session owns — a file at the root itself,
+  or one under a directory Pi did not name from a cwd — has no project to authorize, so a configured
+  bound refuses it. Without a bound it stays readable, as it is today.
+- The bound governs these two tools. It is not a filesystem permission: another process, or another
+  tool in the same session, can still read the same files directly.
 
 ## Marking steering messages
 
@@ -112,9 +230,12 @@ keeps warnings complete and bounds what enters context, but it is not an indexed
 
 ### Errors and warnings
 
-Invalid parameters and requests that cannot identify a readable Pi session throw. Recoverable problems
-encountered while walking the session store or reading later transcript lines are returned in a
-`warnings` array. Check warnings whenever the task depends on complete history.
+Invalid parameters and requests that cannot identify a readable Pi session throw. A call whose
+configured access bound cannot be read, and a `session_entries` read of a transcript outside that
+bound, both throw as well, and their message names the setting rather than the session
+([Restricting session access](#restricting-session-access)). Recoverable problems encountered while
+walking the session store or reading later transcript lines are returned in a `warnings` array. Check
+warnings whenever the task depends on complete history.
 
 ---
 
@@ -129,11 +250,12 @@ entries. The operation reads session headers only and never migrates or repairs 
 ### Parameters
 
 Every parameter is optional; `{}` returns every discoverable top-level session except the running one,
-in ascending timestamp order.
+in ascending timestamp order — within the projects the operator allowed, if any
+([Restricting session access](#restricting-session-access)).
 
 | Parameter | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `cwds` | non-empty `string[]` | all | Absolute working directories to keep. Relative and `~`-prefixed values are compared literally and normally match nothing. |
+| `cwds` | non-empty `string[]` | all | Absolute working directories to keep. Relative and `~`-prefixed values are compared literally and normally match nothing. Selects within the access bound; cannot widen it. |
 | `cwdMatch` | `"exact" \| "sibling-prefix"` | `"exact"` | How each `cwds` value is matched. `sibling-prefix` also includes sibling directories shaped like adjacent worktrees. |
 | `includeCurrentSession` | boolean | `false` | Keep the session this call runs inside. By default it is excluded, with the transcripts nested under it, before filtering, sorting, and `limit`. |
 | `startTimestamp` | ISO 8601 date or date-time | unbounded | Inclusive lower bound on the session header timestamp. |
@@ -179,6 +301,10 @@ type ListSessionsWarning = {
 
 Filters and `limit` apply to top-level sessions only. A matching parent arrives with its complete
 reachable `subagentSessions` tree; children are not filtered and do not count toward `limit`.
+
+An access bound removes projects *before* any of this applies: a session in a denied project is not
+filtered out by a parameter, it is never discovered for the call at all, and neither it nor its
+children nor its warnings appear anywhere in the result.
 
 Subagent nesting and `parentSessionPath` describe different relationships:
 
@@ -250,13 +376,17 @@ Interpret the two result arrays together:
 | --- | --- | --- |
 | non-empty | empty | Discoverable history was read cleanly. |
 | non-empty | non-empty | Usable sessions were returned, but some reachable data was skipped. |
-| `[]` | empty | Nothing discoverable matched, or the sessions root was empty. |
+| `[]` | empty | Nothing discoverable matched, the sessions root was empty, or an access bound allowed no matching project. |
 | `[]` | non-empty | History may exist but was unreadable; do not conclude that no history exists. |
 
 Warnings cover the complete discovery walk, not only sessions retained by current-session exclusion,
 filters, or `limit`. A failed child is absent from its parent's `subagentSessions` and contributes a
 warning naming its path. Excluding the current session is likewise a step over the rows the walk
 produced: its unreadable neighbours stay reported.
+
+An access bound is the exception to "the whole scan is described": a denied project contributes no
+warning, so `warnings` says what this call was allowed to see. With no bound configured, every reachable
+file is described as before.
 
 Invalid timestamp bounds, a reversed timestamp range, and `limit < 1` throw rather than returning an
 empty result.
@@ -290,6 +420,8 @@ return {
 - Use `path`, not `id`, as the unique handle for a returned transcript.
 - Discovery follows supported Pi and pi-subagents storage layouts. Unreachable orphaned child trees
   are not returned and cannot produce warnings.
+- An access bound is not reported. `sessions` shows what the bound permitted, and the absence of a
+  project says nothing about whether it exists.
 - `limit` caps output but does not reduce header reads, and there is no offset or cursor.
 - The session the call runs inside is excluded by default, with the transcripts nested under it, and
   `includeCurrentSession: true` keeps it. Identity is that session's file, so the rule is exact only
@@ -329,6 +461,11 @@ context edits, branch selection, or system-prompt state folding.
 `sessionPath` is confined to the sessions root. Relative paths, paths that escape the root, symlinks
 whose resolved target is outside it, and files whose first line is not a Pi session header throw. A
 nested subagent transcript path returned by `list_sessions` is valid.
+
+Confinement is not permission. With `piRetrospect.allowedProjects` configured, the transcript is
+authorized through the top-level session that owns its directory, so a delegated run is reachable when
+its parent's project is allowed whatever its own cwd says, and a path no allowed session owns throws
+([Restricting session access](#restricting-session-access)).
 
 ### Result
 
@@ -430,7 +567,9 @@ is human-readable detail rather than an enum.
 | `legacy_version` | The session predates durable entry ids. | No rows are skipped, but returned `id` and `parentId` values are `null`. |
 
 Invalid filters, an unreadable or out-of-root path, and a file without a valid session header throw
-instead of producing warnings.
+instead of producing warnings. So does a transcript whose project the configured access bound does not
+admit: the refusal names the setting, never the path, and it is a throw rather than an empty `entries`
+array, because "not permitted" must not look like "nothing there".
 
 ### `text` and `raw`
 
