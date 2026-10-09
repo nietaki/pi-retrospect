@@ -11,10 +11,18 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 
 import { renderListSessionsContent } from "./content.ts";
 import { listSessions } from "./list-sessions.ts";
+import { readProjectAccessPolicy } from "./project-access.ts";
 import { ListSessionsOutputSchema, ListSessionsParamsSchema } from "./schemas.ts";
 
 export interface ListSessionsToolOptions {
   sessionsRoot: string;
+  /**
+   * Reads Pi's effective settings, asked on every call. `src/index.ts` supplies `pi.getSettings`.
+   *
+   * Omit it — a factory test, or the listing used as a library — and there is no policy to read, so
+   * the tool keeps the access that existed before `allowedProjects` did.
+   */
+  readSettings?: () => unknown;
 }
 
 export function createListSessionsTool(options: ListSessionsToolOptions) {
@@ -63,6 +71,12 @@ export function createListSessionsTool(options: ListSessionsToolOptions) {
       // Pi process, and a stale path would exclude the wrong transcript. A tool run without a
       // session context has no current session to exclude, so the reads stay optional.
       const currentSessionPath = ctx?.sessionManager?.getSessionFile();
+
+      // Asked per call, never cached, for the same reason the session file is read per call: the
+      // effective settings change inside one Pi process, and `/reload` is what picks up an edited
+      // allowlist. A policy this call cannot read fails the call before the scan starts rather than
+      // falling back to the wide-open access the operator's typo was meant to prevent.
+      readProjectAccessPolicy(options.readSettings);
 
       const output = await listSessions(params, {
         sessionsRoot: options.sessionsRoot,

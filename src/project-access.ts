@@ -32,8 +32,8 @@ export type ProjectAccessPolicy =
   | { readonly mode: "deny-all" }
   | { readonly mode: "allowlist"; readonly projects: readonly string[] };
 
-/** What an installation gets when the setting says nothing. */
-const UNRESTRICTED: ProjectAccessPolicy = { mode: "unrestricted" };
+/** What an installation gets when the setting says nothing, and what a tool gets without a reader. */
+export const UNRESTRICTED_POLICY: ProjectAccessPolicy = { mode: "unrestricted" };
 
 /** The settings namespace this extension owns, and the key inside it that holds the allowlist. */
 const SETTINGS_NAMESPACE = "piRetrospect";
@@ -91,17 +91,45 @@ export function parseProjectAccessPolicy(settings: unknown): ProjectAccessPolicy
 
   // The namespace is absent, so nothing was configured. A snapshot that cannot be read is a
   // different thing, and it is the operator's value that has to be well formed.
-  if (namespace === undefined) return UNRESTRICTED;
+  if (namespace === undefined) return UNRESTRICTED_POLICY;
   if (!isPlainRecord(namespace)) throw new ProjectAccessError();
 
   const configured = namespace[SETTING_KEY];
-  if (configured === undefined) return UNRESTRICTED;
+  if (configured === undefined) return UNRESTRICTED_POLICY;
 
   if (!Array.isArray(configured)) throw new ProjectAccessError();
   if (configured.length === 0) return { mode: "deny-all" };
-  if (configured.includes(WILDCARD)) return UNRESTRICTED;
+  if (configured.includes(WILDCARD)) return UNRESTRICTED_POLICY;
 
   return { mode: "allowlist", projects: configured.map(projectBasenameOf) };
+}
+
+/**
+ * The policy behind a settings reader, read now.
+ *
+ * A tool asks this on every call because Pi's effective settings are unreadable while an extension
+ * factory is still loading, and `/reload`, a project change, or a new session replaces them
+ * afterwards — so the reader is the dependency, never its result.
+ *
+ * With no reader at all, the caller is the core operation rather than a registered tool, and the
+ * answer is the access that existed before this setting did.
+ *
+ * A reader that throws fails the same way a malformed value does. Its own message is dropped, not
+ * chained: a failed call hands its message to whoever called it, and a settings-file error tends to
+ * name the file it could not read.
+ */
+export function readProjectAccessPolicy(readSettings?: () => unknown): ProjectAccessPolicy {
+  if (readSettings === undefined) return UNRESTRICTED_POLICY;
+
+  let snapshot: unknown;
+
+  try {
+    snapshot = readSettings();
+  } catch {
+    throw new ProjectAccessError();
+  }
+
+  return parseProjectAccessPolicy(snapshot);
 }
 
 /**

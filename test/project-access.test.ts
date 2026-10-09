@@ -15,12 +15,13 @@
  * Contract: docs/tool-api.md, "Restricting session access"
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   isProjectAllowed,
   parseProjectAccessPolicy,
   ProjectAccessError,
+  readProjectAccessPolicy,
 } from "../src/project-access.ts";
 
 /** The shapes a policy can have, spelled once so each test names only what it expects. */
@@ -192,5 +193,46 @@ describe("isProjectAllowed: the project a cwd names", () => {
     expect(isProjectAllowed(policy, "/x/bar")).toBe(true);
     expect(isProjectAllowed(policy, "/x/baz-1")).toBe(true);
     expect(isProjectAllowed(policy, "/x/qux")).toBe(false);
+  });
+});
+
+/**
+ * The boundary the tools stand in: a settings reader, not a settings object.
+ *
+ * Pi's effective settings are unreadable while an extension factory is still loading, and `/reload`
+ * replaces them afterwards, so a tool holds the reader and asks it per call. Two consequences are
+ * worth pinning: a reader that fails is a policy failure rather than a free pass, and nothing here
+ * caches a snapshot.
+ */
+describe("readProjectAccessPolicy: reading the settings per call", () => {
+  it("is unrestricted when the caller supplied no settings reader", () => {
+    // The core operations and the factory tests that never mention settings live in a world without
+    // a policy, which is the behavior from before the setting existed.
+    expect(readProjectAccessPolicy()).toStrictEqual(UNRESTRICTED);
+    expect(readProjectAccessPolicy(undefined)).toStrictEqual(UNRESTRICTED);
+  });
+
+  it("parses whatever the reader returns", () => {
+    expect(readProjectAccessPolicy(() => settingsFor(["bar"]))).toStrictEqual(allowlist("bar"));
+  });
+
+  it("asks the reader again on every call, so a reloaded setting takes effect", () => {
+    const snapshots = [settingsFor(["bar"]), settingsFor(["bar", "baz"]), settingsFor(["*"])];
+    const readSettings = vi.fn(() => snapshots.shift());
+
+    expect(readProjectAccessPolicy(readSettings)).toStrictEqual(allowlist("bar"));
+    expect(readProjectAccessPolicy(readSettings)).toStrictEqual(allowlist("bar", "baz"));
+    expect(readProjectAccessPolicy(readSettings)).toStrictEqual(UNRESTRICTED);
+    expect(readSettings).toHaveBeenCalledTimes(3);
+  });
+
+  it("treats a reader that fails as a policy failure", () => {
+    const readSettings = vi.fn(() => {
+      throw new Error("/repo/private/settings.json is unreadable");
+    });
+
+    expect(() => readProjectAccessPolicy(readSettings)).toThrow(ProjectAccessError);
+    // The reader's own message named a path, and a failing call hands its message to the caller.
+    expect(() => readProjectAccessPolicy(readSettings)).not.toThrow("unreadable");
   });
 });

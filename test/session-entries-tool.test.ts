@@ -11,7 +11,7 @@
 
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -36,13 +36,20 @@ const firstTextBlock = (result: Awaited<ReturnType<typeof tool.execute>>): strin
 const structured = (result: Awaited<ReturnType<typeof tool.execute>>): SessionEntriesOutput =>
   result.structuredContent as SessionEntriesOutput;
 
-const fakeExtensionApi = (registered: Array<{ name: string; description: string }>) =>
+/** A registered tool, as far as these tests need to see one: `execute` included, so it can be called. */
+type RegisteredTool = { name: string; description: string; execute: typeof tool.execute };
+
+const fakeExtensionApi = (
+  registered: RegisteredTool[],
+  getSettings: () => unknown = () => ({}),
+) =>
   ({
-    registerTool: (definition: { name: string; description: string }) => {
+    registerTool: (definition: RegisteredTool) => {
       registered.push(definition);
     },
     // `src/index.ts` also subscribes the steering marker to input; these tests only read the tools.
     on: () => () => {},
+    getSettings,
   }) as unknown as ExtensionAPI;
 
 beforeAll(async () => {
@@ -314,9 +321,65 @@ describe("session_entries tool execution", () => {
   });
 });
 
+/**
+ * The `piRetrospect.allowedProjects` boundary as this tool sees it.
+ *
+ * Pi cannot be asked for its effective settings while an extension factory is still running, and
+ * `/reload` replaces them afterwards, so the tool holds a reader rather than a value: it asks on
+ * every call, and a settings snapshot that cannot be read fails the call. `session_entries` is the
+ * tool a caller can point at one transcript by path, so it has to answer to the same settings as
+ * `list_sessions` does, and reading them the same way is the precondition for that.
+ */
+describe("session_entries project access", () => {
+  it("never reads settings while the tool is being built", () => {
+    const readSettings = vi.fn(() => ({}));
+
+    createSessionEntriesTool({ sessionsRoot: ROOT, readSettings });
+
+    expect(readSettings).not.toHaveBeenCalled();
+  });
+
+  it("asks for the effective settings on every call, so a reload takes effect", async () => {
+    const snapshots = [{}, { piRetrospect: { allowedProjects: ["p"] } }];
+    const readSettings = vi.fn(() => snapshots.shift());
+    const gated = createSessionEntriesTool({ sessionsRoot: ROOT, readSettings });
+
+    await gated.execute("access-1", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT);
+    await gated.execute("access-2", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT);
+
+    expect(readSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails a call whose allowlist cannot be read, without naming what it holds", async () => {
+    const gated = createSessionEntriesTool({
+      sessionsRoot: ROOT,
+      readSettings: () => ({ piRetrospect: { allowedProjects: "/repo/hidden-project" } }),
+    });
+
+    const message = await gated
+      .execute("access-3", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT)
+      .then(() => "")
+      .catch((error: unknown) => (error as Error).message);
+
+    expect(message).toContain("piRetrospect.allowedProjects");
+    expect(message).not.toContain("hidden-project");
+    expect(message).not.toContain(ROOT);
+    expect(message).not.toContain(SESSION);
+  });
+
+  it("reads the same entries as the reader does when no settings reader was supplied", async () => {
+    const ungated = createSessionEntriesTool({ sessionsRoot: ROOT });
+    const expected = await readSessionEntries({ sessionPath: SESSION }, { sessionsRoot: ROOT });
+
+    expect(
+      structured(await ungated.execute("access-4", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT)),
+    ).toStrictEqual(expected);
+  });
+});
+
 describe("extension entry point", () => {
   it("registers list_sessions and session_entries", async () => {
-    const registered: Array<{ name: string; description: string }> = [];
+    const registered: RegisteredTool[] = [];
     const { default: extension } = await import("../src/index.ts");
 
     extension(fakeExtensionApi(registered));
@@ -329,5 +392,26 @@ describe("extension entry point", () => {
       expect(typeof definition.description).toBe("string");
       expect(definition.description.length).toBeGreaterThan(0);
     }
+  });
+
+  it("gives both tools the effective settings without reading them while it registers", async () => {
+    const registered: RegisteredTool[] = [];
+    // A malformed allowlist is the shape that proves the reader really is `pi.getSettings`: the only
+    // way a registered tool can fail on it is by having asked for it.
+    const getSettings = vi.fn(() => ({ piRetrospect: { allowedProjects: 42 } }));
+    const { default: extension } = await import("../src/index.ts");
+
+    extension(fakeExtensionApi(registered, getSettings));
+
+    expect(getSettings, "settings are unreadable while the factory runs").not.toHaveBeenCalled();
+
+    // `list_sessions` and `session_entries` answer to one policy, so the same snapshot refuses both;
+    // this file can call only the reader's own `execute` without a cast, and `list_sessions` proves
+    // its half in its own test.
+    await expect(
+      registered[1]?.execute("entry-2", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT),
+    ).rejects.toThrow(/piRetrospect\.allowedProjects/);
+
+    expect(getSettings).toHaveBeenCalledTimes(1);
   });
 });
