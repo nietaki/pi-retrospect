@@ -197,6 +197,13 @@ describe("session_entries tool registration", () => {
     expect(tool.description).toContain("warnings describe the whole file");
   });
 
+  it("describes the access bound a path cannot walk through", () => {
+    // Confinement to the root is the old rule; the new one is that a path inside the root is not
+    // automatically a readable one, and a caller should learn that before naming a file.
+    expect(tool.description).toContain("piRetrospect.allowedProjects");
+    expect(tool.description).toMatch(/Knowing a path is not permission/);
+  });
+
   it("describes what search matches and what it cannot reach", () => {
     expect(tool.description).toContain("search");
     expect(tool.description).toMatch(/literal substring/i);
@@ -365,6 +372,26 @@ describe("session_entries project access", () => {
     expect(message).not.toContain("hidden-project");
     expect(message).not.toContain(ROOT);
     expect(message).not.toContain(SESSION);
+  });
+
+  it("re-decides which transcript to open from the snapshot it reads on each call", async () => {
+    // The reader is asked per call and the answer decides the read: the same tool instance, the same
+    // path, and two effective settings that disagree about the project that path lives in.
+    const snapshots = [{ piRetrospect: { allowedProjects: ["p"] } }, { piRetrospect: { allowedProjects: ["no-p"] } }];
+    const gated = createSessionEntriesTool({ sessionsRoot: ROOT, readSettings: () => snapshots.shift() });
+
+    expect(structured(await gated.execute("access-3", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT)).entries).toHaveLength(
+      2,
+    );
+
+    const message = await gated
+      .execute("access-4", { sessionPath: SESSION }, undefined, undefined, NO_CONTEXT)
+      .then(() => "")
+      .catch((error: unknown) => (error as Error).message);
+
+    expect(message).toContain("piRetrospect.allowedProjects");
+    expect(message).not.toContain(ROOT);
+    expect(message).not.toContain("--p--");
   });
 
   it("reads the same entries as the reader does when no settings reader was supplied", async () => {

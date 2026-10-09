@@ -55,17 +55,36 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  */
 const POLICY_ERROR_MESSAGE = "piRetrospect.allowedProjects is not a valid project allowlist";
 
+/** What a caller is told when the policy refuses a transcript, and nothing else. */
+const DENIED_MESSAGE = "session is outside the projects allowed by piRetrospect.allowedProjects";
+
 /**
- * A configured access policy this module cannot read.
+ * A project-access failure a tool reports to its caller.
  *
  * Both tools throw this instead of guessing: treating an unusable allowlist as no allowlist would
- * turn an operator's typo into the unrestricted access the typo was meant to prevent.
+ * turn an operator's typo into the unrestricted access the typo was meant to prevent, and answering
+ * a refusal with the refused path would confirm what the allowlist hides.
  */
 export class ProjectAccessError extends Error {
-  constructor() {
-    super(POLICY_ERROR_MESSAGE);
+  constructor(message: string) {
+    super(message);
     this.name = "ProjectAccessError";
   }
+}
+
+/** The configured policy cannot be read: fail closed rather than fall open. */
+function invalidPolicy(): never {
+  throw new ProjectAccessError(POLICY_ERROR_MESSAGE);
+}
+
+/**
+ * The error for a transcript the policy does not admit.
+ *
+ * A caller may hold a path without holding permission for it — that is the bypass this exists to
+ * close — so the answer is a refusal that names only the setting.
+ */
+export function projectAccessDeniedError(): ProjectAccessError {
+  return new ProjectAccessError(DENIED_MESSAGE);
 }
 
 /**
@@ -76,28 +95,28 @@ export class ProjectAccessError extends Error {
  * restriction, and the wrong reading of that value is the wide-open one.
  */
 function projectBasenameOf(item: unknown): string {
-  if (typeof item !== "string" || item === "") throw new ProjectAccessError();
-  if (item.includes("/") || item.includes("\\")) throw new ProjectAccessError();
-  if (item === "." || item === "..") throw new ProjectAccessError();
+  if (typeof item !== "string" || item === "") invalidPolicy();
+  if (item.includes("/") || item.includes("\\")) invalidPolicy();
+  if (item === "." || item === "..") invalidPolicy();
 
   return item;
 }
 
 /** Parse the effective settings object into the policy it describes. */
 export function parseProjectAccessPolicy(settings: unknown): ProjectAccessPolicy {
-  if (!isPlainRecord(settings)) throw new ProjectAccessError();
+  if (!isPlainRecord(settings)) invalidPolicy();
 
   const namespace = settings[SETTINGS_NAMESPACE];
 
   // The namespace is absent, so nothing was configured. A snapshot that cannot be read is a
   // different thing, and it is the operator's value that has to be well formed.
   if (namespace === undefined) return UNRESTRICTED_POLICY;
-  if (!isPlainRecord(namespace)) throw new ProjectAccessError();
+  if (!isPlainRecord(namespace)) invalidPolicy();
 
   const configured = namespace[SETTING_KEY];
   if (configured === undefined) return UNRESTRICTED_POLICY;
 
-  if (!Array.isArray(configured)) throw new ProjectAccessError();
+  if (!Array.isArray(configured)) invalidPolicy();
   if (configured.length === 0) return { mode: "deny-all" };
   if (configured.includes(WILDCARD)) return UNRESTRICTED_POLICY;
 
@@ -126,7 +145,7 @@ export function readProjectAccessPolicy(readSettings?: () => unknown): ProjectAc
   try {
     snapshot = readSettings();
   } catch {
-    throw new ProjectAccessError();
+    invalidPolicy();
   }
 
   return parseProjectAccessPolicy(snapshot);

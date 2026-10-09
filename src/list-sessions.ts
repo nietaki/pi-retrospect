@@ -10,11 +10,12 @@
  */
 
 import { readdir } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { applyQuery, buildQuery, excludeSessionTree, instantOf } from "./query.ts";
 import { isProjectAllowed, UNRESTRICTED_POLICY } from "./project-access.ts";
 import type { ProjectAccessPolicy } from "./project-access.ts";
+import { containerOf, PROJECT_DIRECTORY, SESSION_EXTENSION, SUBAGENT_FILE_NAME } from "./session-layout.ts";
 import { readSessionHeader } from "./session-metadata.ts";
 import type {
   ListSessionsOutput,
@@ -22,14 +23,6 @@ import type {
   ListSessionsWarning,
   SessionMetadata,
 } from "./schemas.ts";
-
-/** Pi encodes a cwd into `--<slug>--`; anything else at that level is not a project. */
-const PROJECT_DIRECTORY = /^--.*--$/;
-
-/** Extension-written name of a subagent transcript. Top-level sessions are `<stem>.jsonl`. */
-const SUBAGENT_FILE_NAME = "session.jsonl";
-
-const SESSION_EXTENSION = ".jsonl";
 
 export interface ListSessionsOptions {
   /**
@@ -74,11 +67,6 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw signal.reason instanceof Error ? signal.reason : new Error("listSessions was aborted");
   }
-}
-
-/** `dir/file.jsonl` -> `dir/file`, the directory that holds this session's subagent trees. */
-function containerOf(path: string): string {
-  return join(dirname(path), basename(path, SESSION_EXTENSION));
 }
 
 function containsPath(container: string, path: string): boolean {
