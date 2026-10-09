@@ -43,11 +43,12 @@ pi -e npm:pi-retrospect
 
 `pi list` shows configured packages, `pi remove pi-retrospect` removes it.
 
-**Requires Pi 0.99.0 or newer.** The tool registration uses `exposure`, `annotations`,
-and `outputSchema`, which were added in Pi 0.99.0 (2026-09-29). Verified against
-0.99.2 and 1.0.0. The peer ranges stay `"*"` because that is the convention Pi
-prescribes for host-provided packages — Pi does not resolve them for managed installs,
-so the minimum is stated here rather than in `package.json`.
+**Requires Node.js 24 or newer and Pi 0.99.0 or newer.** The tool registration uses
+`exposure`, `annotations`, and `outputSchema`, which were added in Pi 0.99.0 (2026-09-29).
+Verified against 0.99.2 and 1.0.0. The peer ranges stay `"*"` because that is the convention
+Pi prescribes for host-provided packages — Pi does not resolve them for managed installs,
+so the Pi minimum is stated here rather than in `package.json`; the Node.js minimum is also
+declared in `package.json`.
 
 ## Using it
 
